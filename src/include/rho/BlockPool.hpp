@@ -44,6 +44,7 @@ class BlockPool {
 		void free(void* p);
 
 		void* get_block_pointer(void* pointer);
+		bool in_domain(void* pointer);
 		void* apply_to_blocks(std::function<void(void*)> f);
 };
 

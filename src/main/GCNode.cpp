@@ -170,7 +170,7 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
-    if (bytes == 48 || block_pool.get_block_pointer(p)) {
+    if (bytes == 48 || block_pool.in_domain(p)) {
         block_pool.free(p);
     } else {
 
