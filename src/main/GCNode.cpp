@@ -30,6 +30,7 @@
  */
 
 #include "rho/GCNode.hpp"
+#include "rho/BlockPool.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -49,6 +50,38 @@ extern "C" {
 
 using namespace std;
 using namespace rho;
+
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+
+using namespace std;
+
+typedef std::uint64_t u64;
+
+inline int first_free(u64 bitset)
+{
+	if (bitset == 0) {
+		return -1;
+	}
+	// Use builtin count trailing zeroes if available.
+#if __has_builtin(__builtin_ctzll)
+	return __builtin_ctzll(bitset);
+#else
+	// This is an inefficient implementation of finding the number of
+	// trailing zeroes.  We rely on __builtin_ctzll above for performance.
+	// This version can be replaced to improve the case where __builtin_ctzll
+	// is not available.
+	int log2 = 0;
+	while (!(bitset & 1ull)) {
+		log2 += 1;
+		bitset >>= 1;
+	}
+	return log2;
+#endif
+}
+
+static BlockPool block_pool(48, 32000);
 
 vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
@@ -106,12 +139,18 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     MemoryBank::notifyAllocation(bytes);
     void *result;
 
+    if (bytes == 48) {
+        result = block_pool.alloc();
+    } else {
+
 #ifdef HAVE_ADDRESS_SANITIZER
     result = asan_allocate(bytes);
 #else
     result = GC_malloc_atomic(bytes);
     set_allocated_bit(result);
 #endif
+
+    }
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -131,12 +170,18 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
+    if (bytes == 48 || block_pool.get_block_pointer(p)) {
+        block_pool.free(p);
+    } else {
+
 #ifdef HAVE_ADDRESS_SANITIZER
     asan_free(p);
 #else
     clear_allocated_bit(p);
     GC_free(p);
 #endif
+
+    }
 }
 
 bool GCNode::check()
@@ -326,6 +371,9 @@ void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
 {
     GC_apply_to_all_blocks(
 	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
+    block_pool.apply_to_blocks([=](void* pointer) {
+            f(reinterpret_cast<GCNode*>(pointer));
+        });
 }
 
 
@@ -365,6 +413,11 @@ void rho::initializeMemorySubsystem()
 
 GCNode* GCNode::asGCNode(void* candidate_pointer)
 {
+    void* block_pointer = block_pool.get_block_pointer(candidate_pointer);
+    if (block_pointer) {
+        return reinterpret_cast<GCNode*>(block_pointer);
+    }
+
     if (candidate_pointer < GC_least_plausible_heap_addr
 	|| candidate_pointer > GC_greatest_plausible_heap_addr)
 	return nullptr;

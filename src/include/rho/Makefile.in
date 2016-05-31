@@ -29,7 +29,7 @@ distdir = $(top_builddir)/$(PACKAGE)-$(VERSION)/$(subdir)
 
 RHO_HPPS = \
   AddressSanitizer.hpp Allocator.hpp ArgList.hpp ArgMatcher.hpp BinaryFunction.hpp \
-  BuiltInFunction.hpp CellPool.hpp Closure.hpp CommandChronicle.hpp Complex.hpp \
+  BlockPool.hpp BuiltInFunction.hpp CellPool.hpp Closure.hpp CommandChronicle.hpp Complex.hpp \
   ComplexVector.hpp ConsCell.hpp \
   DotInternal.hpp \
   Environment.hpp ElementTraits.hpp Evaluator.hpp Evaluator_Context.hpp \
