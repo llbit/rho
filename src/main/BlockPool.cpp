@@ -60,11 +60,10 @@ void BlockPool::free(void* pointer)
 			if (i < m_next_superblock) {
 				m_next_superblock = i;
 				superblock->next_free = index;
-			} else {
-				if (index < superblock->next_free) {
-					superblock->next_free = index;
-				}
 			}
+                        if (index < superblock->next_free) {
+                            superblock->next_free = index;
+                        }
 			return;
 		}
 		i += 1;
@@ -100,7 +99,7 @@ void BlockPool::update_next_superblock()
 {
 	int next = m_next_superblock + 1;
 	while (next < m_superblocks.size()) {
-		if (m_superblocks[next]->next_free >= 0) {
+		if (m_superblocks[next]->next_free < m_superblock_size) {
 			m_next_superblock = next;
 			return;
 		}
@@ -124,7 +123,7 @@ void BlockPool::allocate_block(Superblock* superblock, int block)
 		}
 		bitset += 1;
 	} while (bitset < m_bitset_entries);
-	superblock->next_free = -1;
+	superblock->next_free = m_superblock_size;
         update_next_superblock();
 }
 

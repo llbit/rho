@@ -9,7 +9,7 @@ typedef std::uint64_t u64;
 class BlockPool {
 	private:
 		struct Superblock {
-			int next_free;
+			unsigned int next_free;
 			volatile u64 free[]; // Free bitset.
 		};
 		size_t m_block_size; // Number of bytes per block.
