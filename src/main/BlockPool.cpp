@@ -159,35 +159,20 @@ void* BlockPool::get_block_pointer(void* pointer)
 	return nullptr;
 }
 
-bool BlockPool::in_domain(void* pointer)
-{
-	size_t block = reinterpret_cast<size_t>(pointer);
-	if (block < m_block_start || block >= m_block_end) {
-		return nullptr;
-	}
-	size_t block_offset = alignof(u64*) + (m_bitset_entries * 8);
-	for (auto superblock : m_superblocks) {
-		size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
-		size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-		if (block >= superblock_start && block < superblock_end) {
-                    return true;
-		}
-	}
-	return false;
-}
-
 void* BlockPool::apply_to_blocks(std::function<void(void*)> f)
 {
 	size_t block_offset = alignof(u64*) + (m_bitset_entries * 8);
 	for (auto superblock : m_superblocks) {
 		size_t block = reinterpret_cast<size_t>(superblock) + block_offset;
 		for (int i = 0; i < m_bitset_entries; ++i) {
+                    if (superblock->free[i] != ~0ull) {
 			for (int index = 0; index < 64; ++index) {
 				if (!(superblock->free[i] & (1ull << index))) {
 					f(reinterpret_cast<void*>(block));
 				}
 				block += m_block_size;
 			}
+                    }
 		}
 	}
 	return nullptr;
