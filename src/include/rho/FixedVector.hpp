@@ -209,9 +209,11 @@ namespace rho {
             // Boehm to manage the memory.
             return GCNode::dynamicAlloc(bytes);
         }
-	void* operator new(size_t bytes, void* p) {
-            return p;
+
+	void* operator new(size_t, void* where) {
+            return where;
         }
+
 	void operator delete(void* p, size_t bytes) {
             GCNode::dynamicFree(p, bytes);
         }

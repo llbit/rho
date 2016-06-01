@@ -41,7 +41,6 @@ void* BlockPool::alloc()
 	if (m_next_superblock >= 0) {
 		superblock = m_superblocks[m_next_superblock];
 		block = get_next_block(superblock);
-		update_next_superblock();
 	} else {
 		// Allocate new superblock.
 		superblock = add_superblock();
@@ -99,16 +98,17 @@ BlockPool::Superblock* BlockPool::add_superblock()
 	return superblock;
 }
 
+// Select next free superblock.
 void BlockPool::update_next_superblock()
 {
-	int next = m_next_superblock;
-	do {
+	int next = m_next_superblock + 1;
+	while (next < m_superblocks.size()) {
 		if (m_superblocks[next]->next_free >= 0) {
 			m_next_superblock = next;
 			return;
 		}
 		next += 1;
-	} while (next < m_superblocks.size());
+	}
 	// No free superblock found.
 	m_next_superblock = -1;
 }
@@ -128,17 +128,15 @@ void BlockPool::allocate_block(Superblock* superblock, int block)
 		bitset += 1;
 	} while (bitset < m_bitset_entries);
 	superblock->next_free = -1;
+        update_next_superblock();
 }
 
 void* BlockPool::get_next_block(Superblock* superblock)
 {
 	size_t block = superblock->next_free;
-	if (block != -1) {
-		allocate_block(superblock, block);
-		return reinterpret_cast<char*>(superblock) + alignof(u64*)
-			+ (m_bitset_entries * 8) + block * m_block_size;
-	}
-	return nullptr;
+        allocate_block(superblock, block);
+        return reinterpret_cast<char*>(superblock) + alignof(u64*)
+            + (m_bitset_entries * 8) + block * m_block_size;
 }
 
 void* BlockPool::get_block_pointer(void* pointer)
