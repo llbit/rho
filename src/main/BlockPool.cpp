@@ -36,18 +36,15 @@ inline int first_free(u64 bitset)
 
 void* BlockPool::alloc()
 {
-	Superblock* superblock;
-	void* block;
 	if (m_next_superblock >= 0) {
-		superblock = m_superblocks[m_next_superblock];
-		block = get_next_block(superblock);
+		Superblock* superblock = m_superblocks[m_next_superblock];
+		return get_next_block(superblock);
 	} else {
 		// Allocate new superblock.
-		superblock = add_superblock();
+		Superblock* superblock = add_superblock();
 		m_next_superblock = m_superblocks.size() - 1;
-		block = get_next_block(superblock);
+		return get_next_block(superblock);
 	}
-	return block;
 }
 
 void BlockPool::free(void* pointer)
