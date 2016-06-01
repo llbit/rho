@@ -81,7 +81,7 @@ inline int first_free(u64 bitset)
 #endif
 }
 
-static BlockPool block_pool(48, 32000);
+static BlockPool block_pool(48, 128000);
 
 vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;

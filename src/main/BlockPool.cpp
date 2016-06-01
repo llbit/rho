@@ -41,9 +41,7 @@ void* BlockPool::alloc()
 		return get_next_block(superblock);
 	} else {
 		// Allocate new superblock.
-		Superblock* superblock = add_superblock();
-		m_next_superblock = m_superblocks.size() - 1;
-		return get_next_block(superblock);
+		return get_next_block(add_superblock());
 	}
 }
 
@@ -74,6 +72,7 @@ void BlockPool::free(void* pointer)
 	printf("???");
 }
 
+// Allocates a new superblock and updates m_next_superblock.
 BlockPool::Superblock* BlockPool::add_superblock()
 {
 	Superblock* superblock = (Superblock*) new char[alignof(u64*)
@@ -92,6 +91,7 @@ BlockPool::Superblock* BlockPool::add_superblock()
 		m_block_end = superblock_end;
 	}
 	m_superblocks.push_back(superblock);
+        m_next_superblock = m_superblocks.size() - 1;
 	return superblock;
 }
 
