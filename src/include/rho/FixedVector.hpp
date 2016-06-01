@@ -202,6 +202,19 @@ namespace rho {
 
 	// Virtual function of GCNode:
 	void visitReferents(const_visitor* v) const override;
+
+	void* operator new(size_t bytes) {
+            // Because FixedVector sizes are dynamic (despite the name) it is difficult to
+            // allocate and free with the fixed-size allocator, so here we go directly to
+            // Boehm to manage the memory.
+            return GCNode::dynamicAlloc(bytes);
+        }
+	void* operator new(size_t bytes, void* p) {
+            return p;
+        }
+	void operator delete(void* p, size_t bytes) {
+            GCNode::dynamicFree(p, bytes);
+        }
     protected:
 	/**
 	 * Declared protected to ensure that FixedVector objects are
@@ -327,7 +340,7 @@ void* rho::FixedVector<T, ST, Initr>::allocate(size_type sz)
     size_type headersize = sizeof(FixedVector);
 
     try {
-	return GCNode::operator new(blocksize + headersize - sizeof(T));
+	return FixedVector<T, ST, Initr>::operator new(blocksize + headersize - sizeof(T));
     } catch (std::bad_alloc) {
 	tooBig(blocksize);
 	return nullptr;

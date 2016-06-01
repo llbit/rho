@@ -147,6 +147,10 @@ namespace rho {
 	 */
 	static void* operator new(size_t bytes) HOT_FUNCTION;
 
+        static void* dynamicAlloc(size_t bytes) HOT_FUNCTION;
+
+        static void dynamicFree(void* p, size_t bytes) HOT_FUNCTION;
+
 	/** @brief Placement new for GCNode.
 	 */
 	static void* operator new(size_t, void* where)

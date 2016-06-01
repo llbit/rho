@@ -170,7 +170,7 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
-    if (bytes == 48 || block_pool.in_domain(p)) {
+    if (bytes == 48) {
         block_pool.free(p);
     } else {
 
@@ -182,6 +182,42 @@ void GCNode::operator delete(void* p, size_t bytes)
 #endif
 
     }
+}
+
+HOT_FUNCTION void* GCNode::dynamicAlloc(size_t bytes)
+{
+    GCManager::maybeGC();
+    MemoryBank::notifyAllocation(bytes);
+    void *result;
+
+#ifdef HAVE_ADDRESS_SANITIZER
+    result = asan_allocate(bytes);
+#else
+    result = GC_malloc_atomic(bytes);
+    set_allocated_bit(result);
+#endif
+
+    // Because garbage collection may occur between this point and the GCNode's
+    // constructor running, we need to ensure that this space is at least
+    // minimally initialized.
+    // We construct a GCNode with a ficticious reference count of 1, to prevent
+    // it from getting marked as moribund or garbage collected (the mark-sweep
+    // GC uses the reference counts, so this is always effective).
+    // It will be overwritten by the real constructor.
+    new (result)GCNode(static_cast<CreateAMinimallyInitializedGCNode*>(nullptr));
+    return result;
+}
+
+HOT_FUNCTION void GCNode::dynamicFree(void* p, size_t bytes)
+{
+    MemoryBank::notifyDeallocation(bytes);
+
+#ifdef HAVE_ADDRESS_SANITIZER
+    asan_free(p);
+#else
+    clear_allocated_bit(p);
+    GC_free(p);
+#endif
 }
 
 bool GCNode::check()
