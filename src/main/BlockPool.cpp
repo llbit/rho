@@ -39,7 +39,7 @@ void* BlockPool::alloc()
     if (m_num_victims > 0) {
         unsigned int block = m_victim[m_last_victim];
         m_num_victims -= 1;
-        m_last_victim = (m_last_victim + 31) & 31;
+        m_last_victim = (m_last_victim + 127) & 127;
         int bitset = block / 64;
         m_free[bitset] &= ~(1ull << (block & 63));
         return m_superblock + block * m_block_size;
@@ -65,9 +65,9 @@ bool BlockPool::try_free(void* pointer)
         uintptr_t bitset = index / 64;
         // TODO: test for double free?
         m_free[bitset] |= 1ull << (index & 63);
-        m_last_victim = (m_last_victim + 1) & 31;
+        m_last_victim = (m_last_victim + 1) & 127;
         m_victim[m_last_victim] = index;
-        if (m_num_victims < 32) {
+        if (m_num_victims < 128) {
             m_num_victims += 1;
         }
         if (bitset < m_first_bitset) {
