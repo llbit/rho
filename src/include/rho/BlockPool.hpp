@@ -3,6 +3,8 @@
 #include <vector>
 #include <limits>
 
+#include "rho/GCNode.hpp"
+
 using namespace std;
 typedef std::uint64_t u64;
 
@@ -32,7 +34,7 @@ class BlockPool {
         bool try_free(void* p);
 
         void* get_block_pointer(void* pointer);
-        void* apply_to_blocks(std::function<void(void*)> f);
+        void* apply_to_blocks(std::function<void(rho::GCNode*)> f);
         void print_alloc_stats();
 
     private:

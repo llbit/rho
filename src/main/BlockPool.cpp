@@ -94,14 +94,14 @@ void* BlockPool::get_block_pointer(void* pointer)
     }
 }
 
-void* BlockPool::apply_to_blocks(std::function<void(void*)> f)
+void* BlockPool::apply_to_blocks(std::function<void(rho::GCNode*)> f)
 {
     char* block = m_superblock;
     for (int i = 0; i < m_bitset_entries; ++i) {
         if (m_free[i] != ~0ull) {
             for (int index = 0; index < 64; ++index) {
                 if (!(m_free[i] & (1ull << index))) {
-                    f(block);
+                    f(reinterpret_cast<rho::GCNode*>(block));
                 }
                 block += m_block_size;
             }

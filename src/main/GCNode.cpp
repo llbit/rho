@@ -408,9 +408,7 @@ void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
 {
     GC_apply_to_all_blocks(
 	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
-    block_pool.apply_to_blocks([=](void* pointer) {
-            f(reinterpret_cast<GCNode*>(pointer));
-        });
+    block_pool.apply_to_blocks(f);
 }
 
 
