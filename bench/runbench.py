@@ -212,8 +212,8 @@ def main():
         bench(gitref, args, build_rho(gitref, args, jit=False))
         bench(gitref, args, build_rho(gitref, args, jit=True))
         # Also run CR to get a baseline for performance.
-        bench(gitref, args, use_cr(jit=False))
-        bench(gitref, args, use_cr(jit=True))
+        #bench(gitref, args, use_cr(jit=False))
+        #bench(gitref, args, use_cr(jit=True))
         # Update version list file to add newly benchmarked version:
         with open(os.path.join(args.result_dir, 'versions'), 'a') as f:
             print >>f, '%s, %s' % (gitref, get_timestamp(gitref, args))

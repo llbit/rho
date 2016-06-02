@@ -47,7 +47,7 @@ class BlockPool {
         unsigned int m_first_bitset = 0;
         unsigned int m_num_victims = 0;
         unsigned int m_last_victim = 0;
-        unsigned int m_victim[128];
+        unsigned int m_victim[1024];
 
         u64 volatile* m_free; // Free bitset.
         char* m_storage;
