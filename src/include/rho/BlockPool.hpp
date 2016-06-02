@@ -49,5 +49,6 @@ class BlockPool {
 
 		void* get_block_pointer(void* pointer);
 		void* apply_to_blocks(std::function<void(void*)> f);
+		void print_alloc_stats();
 };
 

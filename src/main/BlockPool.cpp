@@ -49,7 +49,6 @@ void BlockPool::free(void* pointer)
 {
 	size_t block = reinterpret_cast<size_t>(pointer);
 	int i = 0;
-	size_t block_offset = alignof(u64*) + (m_bitset_entries * 8);
 	for (auto superblock : m_superblocks) {
 		size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
 		size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
@@ -141,7 +140,6 @@ void* BlockPool::get_block_pointer(void* pointer)
 	if (block < m_block_start || block >= m_block_end) {
 		return nullptr;
 	}
-	size_t block_offset = alignof(u64*) + (m_bitset_entries * 8);
 	for (auto superblock : m_superblocks) {
 		size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
 		size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
@@ -161,7 +159,6 @@ void* BlockPool::get_block_pointer(void* pointer)
 
 void* BlockPool::apply_to_blocks(std::function<void(void*)> f)
 {
-	size_t block_offset = alignof(u64*) + (m_bitset_entries * 8);
 	for (auto superblock : m_superblocks) {
 		size_t block = reinterpret_cast<size_t>(superblock) + block_offset;
 		for (int i = 0; i < m_bitset_entries; ++i) {
@@ -172,8 +169,33 @@ void* BlockPool::apply_to_blocks(std::function<void(void*)> f)
 				}
 				block += m_block_size;
 			}
+                    } else {
+                        // Whole block is free -- skip past it.
+                        block += 64 * m_block_size;
                     }
 		}
 	}
 	return nullptr;
+}
+
+void BlockPool::print_alloc_stats() {
+    int superblock_index = 0;
+    for (auto superblock : m_superblocks) {
+        superblock_index += 1;
+        printf(">>>>>>>>>> SUPERBLOCK %d\n", superblock_index);
+        for (int i = 0; i < m_bitset_entries; ++i) {
+            u64 bitset = superblock->free[i];
+            for (int index = 0; index < 64; ++index) {
+                if (bitset & (1ull << index)) {
+                    printf(".");
+                } else {
+                    printf("#");
+                }
+            }
+            if (i + 1 < m_bitset_entries) {
+                printf(" ");
+            }
+        }
+        printf("\n");
+    }
 }
