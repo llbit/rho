@@ -141,7 +141,10 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
 
     if (bytes == 48) {
         result = block_pool.alloc();
-    } else {
+        if (result) {
+            return result;
+        }
+    }
 
 #ifdef HAVE_ADDRESS_SANITIZER
     result = asan_allocate(bytes);
@@ -149,8 +152,6 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     result = GC_malloc_atomic(bytes);
     set_allocated_bit(result);
 #endif
-
-    }
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -171,8 +172,10 @@ void GCNode::operator delete(void* p, size_t bytes)
     MemoryBank::notifyDeallocation(bytes);
 
     if (bytes == 48) {
-        block_pool.free(p);
-    } else {
+        if (block_pool.try_free(p)) {
+            return;
+        }
+    }
 
 #ifdef HAVE_ADDRESS_SANITIZER
     asan_free(p);
@@ -180,8 +183,6 @@ void GCNode::operator delete(void* p, size_t bytes)
     clear_allocated_bit(p);
     GC_free(p);
 #endif
-
-    }
 }
 
 HOT_FUNCTION void* GCNode::dynamicAlloc(size_t bytes)

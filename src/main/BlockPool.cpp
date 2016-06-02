@@ -36,179 +36,106 @@ inline int first_free(u64 bitset)
 
 void* BlockPool::alloc()
 {
-    if (m_next_superblock >= 0) {
-        Superblock* superblock = m_superblocks[m_next_superblock];
-        return get_next_block(superblock);
+    if (m_next_free < m_superblock_size) {
+        unsigned int block = m_next_free;
+        allocate_block(block);
+        return m_superblock + block * m_block_size;
     } else {
-        // Allocate new superblock.
-        return get_next_block(add_superblock());
+        // No space left.
+        return nullptr;
     }
 }
 
-void BlockPool::free(void* pointer)
+bool BlockPool::try_free(void* pointer)
 {
-    size_t block = reinterpret_cast<size_t>(pointer);
-    int i = 0;
-    for (auto superblock : m_superblocks) {
-        size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
-        size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-        if (block >= superblock_start && block < superblock_end) {
-            size_t index = (block - superblock_start) / m_block_size;
-            size_t bitset = index / 64;
-            superblock->free[bitset] |= 1ull << (index & 63);
-            if (i < m_next_superblock) {
-                m_next_superblock = i;
-                superblock->next_free = index;
-            }
-            if (index < superblock->next_free) {
-                superblock->next_free = index;
-            }
-            return;
+    uintptr_t block = (uintptr_t) pointer;
+    if (block >= m_block_start && block < m_block_end) {
+        uintptr_t index = (block - m_block_start) / m_block_size;
+        uintptr_t bitset = index / 64;
+        // TODO: test for double free?
+        m_free[bitset] |= 1ull << (index & 63);
+        if (index < m_next_free) {
+            m_next_free = index;
         }
-        i += 1;
+        return true;
     }
-    printf("???");
+    return false;
 }
 
-// Allocates a new superblock and updates m_next_superblock.
-BlockPool::Superblock* BlockPool::add_superblock()
-{
-    Superblock* superblock = (Superblock*) new char[alignof(u64*)
-        + m_bitset_entries * 8 + m_superblock_size * m_block_size];
-    superblock->next_free = 0;
-    for (int i = 0; i < m_bitset_entries; ++i) {
-        superblock->free[i] = ~0ull;
-    }
-    size_t superblock_offset = alignof(u64*) + (m_bitset_entries * 8);
-    size_t superblock_start = reinterpret_cast<size_t>(superblock) + superblock_offset;
-    size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-    if (superblock_start < m_block_start) {
-        m_block_start = superblock_start;
-    }
-    if (superblock_end > m_block_end) {
-        m_block_end = superblock_end;
-    }
-    m_superblocks.push_back(superblock);
-    m_next_superblock = m_superblocks.size() - 1;
-    return superblock;
-}
-
-// Select next free superblock.
-void BlockPool::update_next_superblock()
-{
-    int next = m_next_superblock + 1;
-    while (next < m_superblocks.size()) {
-        if (m_superblocks[next]->next_free < m_superblock_size) {
-            m_next_superblock = next;
-            return;
-        }
-        next += 1;
-    }
-    // No free superblock found.
-    m_next_superblock = -1;
-}
-
-// Tag a block as allocated.
-void BlockPool::allocate_block(Superblock* superblock, int block)
+// Tag a block as allocated and update m_next_free.
+void BlockPool::allocate_block(unsigned int block)
 {
     int bitset = block / 64;
-    superblock->free[bitset] &= ~(1ull << (block & 63));
-    int next_free;
+    m_free[bitset] &= ~(1ull << (block & 63));
     do {
-        next_free = first_free(superblock->free[bitset]);
-        if (next_free >= 0) {
-            superblock->next_free = bitset * 64 + next_free;
+        int first = first_free(m_free[bitset]);
+        if (first >= 0) {
+            m_next_free = bitset * 64 + first;
             return;
         }
         bitset += 1;
     } while (bitset < m_bitset_entries);
-    superblock->next_free = m_superblock_size;
-    update_next_superblock();
-}
-
-void* BlockPool::get_next_block(Superblock* superblock)
-{
-    size_t block = superblock->next_free;
-    allocate_block(superblock, block);
-    return reinterpret_cast<char*>(superblock) + alignof(u64*)
-        + (m_bitset_entries * 8) + block * m_block_size;
+    m_next_free = m_superblock_size;
 }
 
 void* BlockPool::get_block_pointer(void* pointer)
 {
-    size_t block = reinterpret_cast<size_t>(pointer);
+    uintptr_t block = (uintptr_t) pointer;
     if (block < m_block_start || block >= m_block_end) {
         return nullptr;
     }
-    for (auto superblock : m_superblocks) {
-        size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
-        size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-        if (block >= superblock_start && block < superblock_end) {
-            size_t index = (block - superblock_start) / m_block_size;
-            size_t bitset = index / 64;
-            if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
-                return reinterpret_cast<char*>(superblock_start) + index * m_block_size;
-            } else {
-                // The block is not allocated.
-                return nullptr;
-            }
-        }
+    uintptr_t index = (block - m_block_start) / m_block_size;
+    uintptr_t bitset = index / 64;
+    if (!(m_free[bitset] & (1ull << (index & 63)))) {
+        return m_superblock + index * m_block_size;
+    } else {
+        // The block is not currently allocated.
+        return nullptr;
     }
-    return nullptr;
 }
 
 void* BlockPool::apply_to_blocks(std::function<void(void*)> f)
 {
-    for (auto superblock : m_superblocks) {
-        size_t block = reinterpret_cast<size_t>(superblock) + block_offset;
-        for (int i = 0; i < m_bitset_entries; ++i) {
-            if (superblock->free[i] != ~0ull) {
-                for (int index = 0; index < 64; ++index) {
-                    if (!(superblock->free[i] & (1ull << index))) {
-                        f(reinterpret_cast<void*>(block));
-                    }
-                    block += m_block_size;
+    char* block = m_superblock;
+    for (int i = 0; i < m_bitset_entries; ++i) {
+        if (m_free[i] != ~0ull) {
+            for (int index = 0; index < 64; ++index) {
+                if (!(m_free[i] & (1ull << index))) {
+                    f(block);
                 }
-            } else {
-                // Whole block is free -- skip past it.
-                block += 64 * m_block_size;
+                block += m_block_size;
             }
+        } else {
+            // Whole block is free -- skip past it.
+            block += 64 * m_block_size;
         }
     }
     return nullptr;
 }
 
 void BlockPool::print_alloc_stats() {
-    int superblock_index = 0;
-    for (auto superblock : m_superblocks) {
-        superblock_index += 1;
-        printf(">>>>>>>>>> SUPERBLOCK %d\n", superblock_index);
-        for (int i = 0; i < m_bitset_entries; ++i) {
-            u64 bitset = superblock->free[i];
-            int num_free = 0;
-            for (int index = 0; index < 64; ++index) {
-                if (bitset & (1ull << index)) {
-                    num_free += 1;
-                    //printf(".");
-                } else {
-                    //printf("#");
-                }
-            }
-            switch (num_free) {
-                case 0:
-                    printf("##");
-                    break;
-                case 64:
-                    printf("..");
-                    break;
-                default:
-                    printf("%02d", 64 - num_free);
-                    break;
-            }
-            if (i + 1 < m_bitset_entries) {
-                printf(" ");
+    printf(">>>>>>>>>> SUPERBLOCK\n");
+    for (int i = 0; i < m_bitset_entries; ++i) {
+        int num_free = 0;
+        for (int index = 0; index < 64; ++index) {
+            if (m_free[i] & (1ull << index)) {
+                num_free += 1;
             }
         }
-        printf("\n");
+        switch (num_free) {
+            case 0:
+                printf("##"); // Full.
+                break;
+            case 64:
+                printf(".."); // Empty
+                break;
+            default:
+                printf("%02d", 64 - num_free);
+                break;
+        }
+        if (i + 1 < m_bitset_entries) {
+            printf(" ");
+        }
     }
+    printf("\n");
 }
