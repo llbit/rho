@@ -81,7 +81,8 @@ inline int first_free(u64 bitset)
 #endif
 }
 
-static BlockPool block_pool(48, 128000);
+static BlockPool* block_pool_48;
+static BlockPool* block_pool_56;
 
 vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
@@ -140,7 +141,12 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     void *result;
 
     if (bytes == 48) {
-        result = block_pool.alloc();
+        result = block_pool_48->alloc();
+        if (result) {
+            return result;
+        }
+    } else if (bytes == 56) {
+        result = block_pool_56->alloc();
         if (result) {
             return result;
         }
@@ -172,7 +178,11 @@ void GCNode::operator delete(void* p, size_t bytes)
     MemoryBank::notifyDeallocation(bytes);
 
     if (bytes == 48) {
-        if (block_pool.try_free(p)) {
+        if (block_pool_48.try_free(p)) {
+            return;
+        }
+    } else if (bytes == 56) {
+        if (block_pool_56.try_free(p)) {
             return;
         }
     }
@@ -298,6 +308,8 @@ void GCNode::gclite()
 
 void GCNode::initialize()
 {
+    block_pool_48 = new BlockPool(48, 128000);
+    block_pool_56 = new BlockPool(56, 32000);
     s_moribund = new vector<const GCNode*>();
 
     // Initialize the Boehm GC.
@@ -408,7 +420,8 @@ void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
 {
     GC_apply_to_all_blocks(
 	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
-    block_pool.apply_to_blocks(f);
+    block_pool_48->apply_to_blocks(f);
+    block_pool_56->apply_to_blocks(f);
 }
 
 
@@ -448,7 +461,11 @@ void rho::initializeMemorySubsystem()
 
 GCNode* GCNode::asGCNode(void* candidate_pointer)
 {
-    void* block_pointer = block_pool.get_block_pointer(candidate_pointer);
+    void* block_pointer = block_pool_48->get_block_pointer(candidate_pointer);
+    if (block_pointer) {
+        return reinterpret_cast<GCNode*>(block_pointer);
+    }
+    block_pointer = block_pool_56->get_block_pointer(candidate_pointer);
     if (block_pointer) {
         return reinterpret_cast<GCNode*>(block_pointer);
     }
