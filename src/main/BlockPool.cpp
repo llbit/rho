@@ -18,7 +18,7 @@ inline int first_free(u64 bitset)
         return -1;
     }
     // Use builtin count trailing zeroes if available.
-#if __has_builtin(__builtin_ctzll)
+#if defined __GNUC__ || __has_builtin(__builtin_ctzll)
     return __builtin_ctzll(bitset);
 #else
     // This is an inefficient implementation of finding the number of
