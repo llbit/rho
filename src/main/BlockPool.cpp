@@ -185,12 +185,25 @@ void BlockPool::print_alloc_stats() {
         printf(">>>>>>>>>> SUPERBLOCK %d\n", superblock_index);
         for (int i = 0; i < m_bitset_entries; ++i) {
             u64 bitset = superblock->free[i];
+            int num_free = 0;
             for (int index = 0; index < 64; ++index) {
                 if (bitset & (1ull << index)) {
-                    printf(".");
+                    num_free += 1;
+                    //printf(".");
                 } else {
-                    printf("#");
+                    //printf("#");
                 }
+            }
+            switch (num_free) {
+                case 0:
+                    printf("##");
+                    break;
+                case 64:
+                    printf("..");
+                    break;
+                default:
+                    printf("%01d", 64 - num_free);
+                    break;
             }
             if (i + 1 < m_bitset_entries) {
                 printf(" ");
