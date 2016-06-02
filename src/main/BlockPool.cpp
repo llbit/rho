@@ -36,14 +36,25 @@ inline int first_free(u64 bitset)
 
 void* BlockPool::alloc()
 {
-    if (m_next_free < m_superblock_size) {
-        unsigned int block = m_next_free;
-        allocate_block(block);
+    if (m_num_victims > 0) {
+        unsigned int block = m_victim[m_last_victim];
+        m_num_victims -= 1;
+        m_last_victim = (m_last_victim + 31) & 31;
+        int bitset = block / 64;
+        m_free[bitset] &= ~(1ull << (block & 63));
         return m_superblock + block * m_block_size;
     } else {
-        // No space left.
-        return nullptr;
+        while (m_first_bitset < m_bitset_entries) {
+            int block = first_free(m_free[m_first_bitset]);
+            if (block >= 0) {
+                m_free[m_first_bitset] &= ~(1ull << block);
+                return m_superblock + (m_first_bitset * 64 + block) * m_block_size;
+            }
+            m_first_bitset += 1;
+        }
     }
+    // No space left.
+    return nullptr;
 }
 
 bool BlockPool::try_free(void* pointer)
@@ -54,28 +65,17 @@ bool BlockPool::try_free(void* pointer)
         uintptr_t bitset = index / 64;
         // TODO: test for double free?
         m_free[bitset] |= 1ull << (index & 63);
-        if (index < m_next_free) {
-            m_next_free = index;
+        m_last_victim = (m_last_victim + 1) & 31;
+        m_victim[m_last_victim] = index;
+        if (m_num_victims < 32) {
+            m_num_victims += 1;
+        }
+        if (bitset < m_first_bitset) {
+            m_first_bitset = bitset;
         }
         return true;
     }
     return false;
-}
-
-// Tag a block as allocated and update m_next_free.
-void BlockPool::allocate_block(unsigned int block)
-{
-    int bitset = block / 64;
-    m_free[bitset] &= ~(1ull << (block & 63));
-    do {
-        int first = first_free(m_free[bitset]);
-        if (first >= 0) {
-            m_next_free = bitset * 64 + first;
-            return;
-        }
-        bitset += 1;
-    } while (bitset < m_bitset_entries);
-    m_next_free = m_superblock_size;
 }
 
 void* BlockPool::get_block_pointer(void* pointer)

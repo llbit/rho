@@ -9,8 +9,7 @@ typedef std::uint64_t u64;
 class BlockPool {
     public:
         BlockPool(size_t block_size, size_t superblock_size)
-            : m_block_size(block_size),
-              m_next_free(0) {
+            : m_block_size(block_size) {
                 m_bitset_entries = (superblock_size + 63) / 64;
                 m_superblock_size = m_bitset_entries * 64;
                 m_free = new u64[m_bitset_entries];
@@ -43,11 +42,13 @@ class BlockPool {
         uintptr_t m_block_start; // Address of first block.
         uintptr_t m_block_end; // Address of one-past last block end.
 
-        unsigned int m_next_free;
+        unsigned int m_first_bitset = 0;
+        unsigned int m_num_victims = 0;
+        unsigned int m_last_victim = 0;
+        unsigned int m_victim[32];
+
         u64 volatile* m_free; // Free bitset.
         char* m_storage;
         char* m_superblock;
-
-        void allocate_block(unsigned int block);
 };
 
