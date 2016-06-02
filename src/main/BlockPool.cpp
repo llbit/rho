@@ -26,12 +26,49 @@ inline int first_free(u64 bitset)
     // This version can be replaced to improve the case where __builtin_ctzll
     // is not available.
     int log2 = 0;
-    while (!(bitset & 1ull)) {
-        log2 += 1;
-        bitset >>= 1;
+    if (!(bitset & 0xFFFFFFFF)) {
+        log2 = 32;
+        bitset >>= 32;
     }
-    return log2;
+    if (!(bitset & 0xFFFFull)) {
+        log2 += 16;
+        bitset >>= 16;
+    }
+    if (!(bitset & 0xFFull)) {
+        log2 += 8;
+        bitset >>= 8;
+    }
+    if (!(bitset & 0xFull)) {
+        log2 += 4;
+        bitset >>= 4;
+    }
+    if (!(bitset & 0x3ull)) {
+        log2 += 2;
+        bitset >>= 2;
+    }
+    return log2 + 1 - (bitset & 1ull);
 #endif
+}
+
+BlockPool::BlockPool(size_t block_size, size_t superblock_size)
+    : m_block_size(block_size) {
+        m_bitset_entries = (superblock_size + 63) / 64;
+        m_superblock_size = m_bitset_entries * 64;
+        m_free = new u64[m_bitset_entries];
+        for (int i = 0; i < m_bitset_entries; ++i) {
+            m_free[i] = ~0ull;
+        }
+        // Initialize victim buffer to point to the first part of the superblock.
+        m_num_victims = 2048;
+        m_last_victim = 2047;
+        for (int i = 0; i < 2048; ++i) {
+            m_victim[i] = 2047 - i;
+        }
+        m_storage = new char[m_superblock_size * m_block_size + 15];
+        // 16-byte align the superblock pointer:
+        m_superblock = reinterpret_cast<char*>(((uintptr_t) m_storage + 15) & (~((uintptr_t) 15)));
+        m_block_start = (uintptr_t) m_superblock;
+        m_block_end = m_block_start + m_superblock_size * m_block_size;
 }
 
 void* BlockPool::alloc()
@@ -39,7 +76,7 @@ void* BlockPool::alloc()
     if (m_num_victims > 0) {
         unsigned int block = m_victim[m_last_victim];
         m_num_victims -= 1;
-        m_last_victim = (m_last_victim + 1023) & 1023;
+        m_last_victim = (m_last_victim + 2047) & 2047;
         int bitset = block / 64;
         m_free[bitset] &= ~(1ull << (block & 63));
         return m_superblock + block * m_block_size;
@@ -65,9 +102,9 @@ bool BlockPool::try_free(void* pointer)
         uintptr_t bitset = index / 64;
         // TODO: test for double free?
         m_free[bitset] |= 1ull << (index & 63);
-        m_last_victim = (m_last_victim + 1) & 1023;
+        m_last_victim = (m_last_victim + 1) & 2047;
         m_victim[m_last_victim] = index;
-        if (m_num_victims < 1024) {
+        if (m_num_victims < 2048) {
             m_num_victims += 1;
         }
         if (bitset < m_first_bitset) {
