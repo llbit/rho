@@ -243,6 +243,21 @@ namespace rho {
 	// Virtual functions of RObject:
 	unsigned int packGPBits() const override;
 	const char* typeName() const override;
+
+	void* operator new(size_t bytes) {
+            // Because String sizes are dynamic it is difficult to
+            // allocate and free with the fixed-size allocator, so here we go directly to
+            // Boehm to manage the memory.
+            return GCNode::dynamicAlloc(bytes);
+        }
+
+	void* operator new(size_t, void* where) {
+            return where;
+        }
+
+	void operator delete(void* p, size_t bytes) {
+            GCNode::dynamicFree(p, bytes);
+        }
     private:
 	friend class Symbol;
 
