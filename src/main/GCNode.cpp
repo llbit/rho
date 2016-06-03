@@ -178,11 +178,11 @@ void GCNode::operator delete(void* p, size_t bytes)
     MemoryBank::notifyDeallocation(bytes);
 
     if (bytes == 48) {
-        if (block_pool_48.try_free(p)) {
+        if (block_pool_48->try_free(p)) {
             return;
         }
     } else if (bytes == 56) {
-        if (block_pool_56.try_free(p)) {
+        if (block_pool_56->try_free(p)) {
             return;
         }
     }
