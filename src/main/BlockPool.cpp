@@ -101,10 +101,12 @@ bool BlockPool::try_free(void* pointer)
     if (block >= m_block_start && block < m_block_end) {
         uintptr_t index = (block - m_block_start) / m_block_size;
         uintptr_t bitset = index / 64;
+#if 0
         if (m_free[bitset] & (1ull << (index & 63))) {
             // Double free!
             error("Double free in block pool.");
         }
+#endif
         m_free[bitset] |= 1ull << (index & 63);
         m_last_victim = (m_last_victim + 1) & 2047;
         m_victim[m_last_victim] = index;
