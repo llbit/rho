@@ -25,9 +25,9 @@ class BlockPool {
         void print_alloc_stats();
 
     private:
-        uintptr_t m_block_size; // Number of bytes per block.
-        uintptr_t m_superblock_size; // Number of blocks in the superblock.
-        uintptr_t m_bitset_entries; // Number of entries in the free bitset.
+        size_t m_block_size; // Number of bytes per block.
+        size_t m_superblock_size; // Number of blocks in the superblock.
+        size_t m_bitset_entries; // Number of entries in the free bitset.
         uintptr_t m_block_start; // Address of first block.
         uintptr_t m_block_end; // Address of one-past last block end.
 

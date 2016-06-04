@@ -1,10 +1,11 @@
-#include "rho/BlockPool.hpp"
-
 #include <algorithm>
 #include <vector>
 #include <cstdint>
 #include <cstdlib>
 #include <stdio.h>
+
+#include "rho/BlockPool.hpp"
+#include "rho/errors.hpp"
 
 #ifndef __has_builtin
 #define __has_builtin(x) 0
@@ -100,7 +101,10 @@ bool BlockPool::try_free(void* pointer)
     if (block >= m_block_start && block < m_block_end) {
         uintptr_t index = (block - m_block_start) / m_block_size;
         uintptr_t bitset = index / 64;
-        // TODO: test for double free?
+        if (m_free[bitset] & (1ull << (index & 63))) {
+            // Double free!
+            error("Double free in block pool.");
+        }
         m_free[bitset] |= 1ull << (index & 63);
         m_last_victim = (m_last_victim + 1) & 2047;
         m_victim[m_last_victim] = index;
@@ -151,7 +155,7 @@ void* BlockPool::apply_to_blocks(std::function<void(rho::GCNode*)> f)
 }
 
 void BlockPool::print_alloc_stats() {
-    printf(">>>>>>>>>> SUPERBLOCK\n");
+    printf(">>>>>>>>>> SUPERBLOCK (blocksize=%zu, num block=%zu)\n", m_block_size, m_superblock_size);
     for (int i = 0; i < m_bitset_entries; ++i) {
         int num_free = 0;
         for (int index = 0; index < 64; ++index) {
