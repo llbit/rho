@@ -74,6 +74,129 @@ static const int kRedzoneSize = 16;
 static const int kRedzoneSize = 0;
 #endif  // HAVE_ADDRESS_SANITIZER
 
+typedef std::uint64_t u64;
+
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+
+inline int first_free(u64 bitset) {
+    if (bitset == 0) {
+        return -1;
+    }
+#if defined __GNUC__ || __has_builtin(__builtin_ctzll)
+    return __builtin_ctzll(bitset);
+#else
+    int log2 = 0;
+    if (!(bitset & 0xFFFFFFFF)) {
+        log2 = 32;
+        bitset >>= 32;
+    }
+    if (!(bitset & 0xFFFFull)) {
+        log2 += 16;
+        bitset >>= 16;
+    }
+    if (!(bitset & 0xFFull)) {
+        log2 += 8;
+        bitset >>= 8;
+    }
+    if (!(bitset & 0xFull)) {
+        log2 += 4;
+        bitset >>= 4;
+    }
+    if (!(bitset & 0x3ull)) {
+        log2 += 2;
+        bitset >>= 2;
+    }
+    return log2 + 1 - (bitset & 1ull);
+#endif
+}
+
+#define BITSET_ENTRIES (32)
+#define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
+
+struct Superblock {
+    unsigned char num_victim = 0;
+    unsigned char last_victim = 0;
+    unsigned short num_free = SUPERBLOCK_SIZE;
+    unsigned short victim[32];
+    u64 free[BITSET_ENTRIES];
+    NodeMetadata metadata[SUPERBLOCK_SIZE];
+
+    Superblock() {
+        for (int i = 0; i < BITSET_ENTRIES; ++i) {
+            free[i] = ~0ull;
+        }
+    }
+};
+
+static unsigned int last_superblock = 0;
+static std::vector<Superblock*> superblocks;
+
+NodeMetadata* GCNode::get_metadata() const {
+    Superblock* superblock = superblocks[m_node_index / SUPERBLOCK_SIZE];
+    return &(superblock->metadata[m_node_index % SUPERBLOCK_SIZE]);
+}
+
+static int next_free(Superblock* superblock) {
+    if (superblock->num_victim > 0) {
+        int index = superblock->victim[superblock->last_victim];
+        superblock->last_victim = (superblock->last_victim + 31) & 31;
+        superblock->num_victim -= 1;
+        return index;
+    } else if (superblock->num_free > 0) {
+        for (int i = 0; i < BITSET_ENTRIES; ++i) {
+            int index = first_free(superblock->free[i]);
+            if (index >= 0) {
+                return i * 64 + index;
+            }
+        }
+    }
+    return -1;
+}
+
+static void alloc_node(Superblock* superblock, GCNode* node, int index) {
+    //assert(superblock->num_free > 0);
+    superblock->free[index / 64] &= ~(1ull << (index & 63));
+    superblock->metadata[index].rcmms = 2; // Minimally initialized.
+    superblock->metadata[index].node = node;
+    superblock->num_free -= 1;
+}
+
+static unsigned int track_node(GCNode* node) {
+    while (last_superblock < superblocks.size()) {
+        int next = next_free(superblocks[last_superblock]);
+        if (next >= 0) {
+            alloc_node(superblocks[last_superblock], node, next);
+            return last_superblock * SUPERBLOCK_SIZE + next;
+        }
+        last_superblock += 1;
+    }
+    Superblock* superblock = new Superblock();
+    superblocks.push_back(superblock);
+    alloc_node(superblock, node, 0);
+    return last_superblock * SUPERBLOCK_SIZE;
+}
+
+/** @brief Mark the specified node as free. */
+static void untrack_node(unsigned int index) {
+    unsigned int superblock_id = index / SUPERBLOCK_SIZE;
+    Superblock* superblock = superblocks[superblock_id];
+    unsigned int local = index % SUPERBLOCK_SIZE;
+    unsigned int bitset = local / 64;
+    superblock->free[bitset] |= 1ull << (local & 63);
+    superblock->num_free += 1;
+    // Add to victim buffer.
+    superblock->last_victim = (superblock->last_victim + 1) & 31;
+    if (superblock->num_victim < 32) {
+        superblock->num_victim += 1;
+    }
+    superblock->victim[superblock->last_victim] = local;
+    if (superblock_id < last_superblock) {
+        last_superblock = superblock_id;
+    }
+}
+
 static void* offset(void* p, size_t bytes) {
     return static_cast<char*>(p) + bytes;
 }
@@ -113,6 +236,8 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     set_allocated_bit(result);
 #endif
 
+    unsigned int node_index = track_node((GCNode*) result);
+
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
     // minimally initialized.
@@ -120,16 +245,15 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     // it from getting marked as moribund or garbage collected (the mark-sweep
     // GC uses the reference counts, so this is always effective).
     // It will be overwritten by the real constructor.
-    new (result)GCNode(static_cast<CreateAMinimallyInitializedGCNode*>(nullptr));
+    new (result)GCNode(node_index);
     return result;
-}
-
-GCNode::GCNode(CreateAMinimallyInitializedGCNode*) : m_rcmms(s_decinc_refcount[1]) {
 }
 
 void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
+
+    untrack_node(((GCNode*) p)->m_node_index);
 
 #ifdef HAVE_ADDRESS_SANITIZER
     asan_free(p);
@@ -143,7 +267,8 @@ bool GCNode::check()
 {
     // Check moribund list:
     for (const GCNode* node: *s_moribund) {
-	if (!(node->m_rcmms & s_moribund_mask)) {
+        NodeMetadata* metadata = node->get_metadata();
+	if (!(metadata->rcmms & s_moribund_mask)) {
 	    cerr << "GCNode::check() : "
 		"Node on moribund list without moribund bit set.\n";
 	    abort();
@@ -203,9 +328,10 @@ void GCNode::gclite()
     while (!s_moribund->empty()) {
 	// Last in, first out, for cache efficiency:
 	const GCNode* node = s_moribund->back();
+        NodeMetadata* metadata = node->get_metadata();
 	s_moribund->pop_back();
 	// Clear moribund bit.  Beware ~ promotes to unsigned int.
-	node->m_rcmms &= static_cast<unsigned char>(~s_moribund_mask);
+	metadata->rcmms &= static_cast<unsigned char>(~s_moribund_mask);
 
 	if (node->maybeGarbage())
 	    delete node;
@@ -245,7 +371,8 @@ void GCNode::makeMoribund() const
 
 void GCNode::addToMoribundList() const
 {
-    m_rcmms |= s_moribund_mask;
+    NodeMetadata* metadata = get_metadata();
+    metadata->rcmms |= s_moribund_mask;
     s_moribund->push_back(this);
 }
 
@@ -335,8 +462,9 @@ void GCNode::Marker::operator()(const GCNode* node)
 	return;
     }
     // Update mark  Beware ~ promotes to unsigned int.
-    node->m_rcmms &= static_cast<unsigned char>(~s_mark_mask);
-    node->m_rcmms |= s_mark;
+    NodeMetadata* metadata = node->get_metadata();
+    metadata->rcmms &= static_cast<unsigned char>(~s_mark_mask);
+    metadata->rcmms |= s_mark;
     node->visitReferents(this);
 }
 
@@ -377,11 +505,11 @@ GCNode* GCNode::asGCNode(void* candidate_pointer)
 }
 
 GCNode::InternalData GCNode::storeInternalData() const {
-    return m_rcmms;
+    return get_metadata()->rcmms;
 }
 
 void GCNode::restoreInternalData(InternalData data) {
-    m_rcmms = data;
+    get_metadata()->rcmms = data;
 }
 
 #ifdef HAVE_ADDRESS_SANITIZER
