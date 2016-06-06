@@ -118,11 +118,12 @@ inline int first_free(u64 bitset) {
 #define BITSET_ENTRIES (128)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
+unsigned num_victim = 0;
+unsigned last_victim = 0;
+unsigned victim[VICTIM_MAX];
+
 struct Superblock {
-    unsigned char num_victim = 0;
-    unsigned char last_victim = 0;
     unsigned short num_free = SUPERBLOCK_SIZE;
-    unsigned short victim[VICTIM_MAX];
     volatile u64 free[BITSET_ENTRIES];
     NodeMetadata metadata[SUPERBLOCK_SIZE];
 
@@ -151,18 +152,13 @@ static int next_free(Superblock* superblock) {
     if (superblock->num_free == 0) {
         return -1;
     }
-    if (superblock->num_victim > 0) {
-        int index = superblock->victim[superblock->last_victim];
-        superblock->last_victim = (superblock->last_victim + VICTIM_MASK) & VICTIM_MASK;
-        superblock->num_victim -= 1;
-        return index;
-    }
     for (int i = 0; i < BITSET_ENTRIES; ++i) {
         int index = first_free(superblock->free[i]);
         if (index >= 0) {
             return i * 64 + index;
         }
     }
+    error("Num free counter is inconsistent for this superblock.");
     return -1;
 }
 
@@ -174,6 +170,13 @@ static void alloc_node(Superblock* superblock, GCNode* node, int index) {
 }
 
 static unsigned int track_node(GCNode* node) {
+    if (num_victim > 0) {
+        int index = victim[last_victim];
+        last_victim = (last_victim + VICTIM_MASK) & VICTIM_MASK;
+        num_victim -= 1;
+        alloc_node((*superblocks)[index / SUPERBLOCK_SIZE], node, index % SUPERBLOCK_SIZE);
+        return index;
+    }
     while (last_superblock < superblocks->size()) {
         int next = next_free((*superblocks)[last_superblock]);
         if (next >= 0) {
@@ -197,11 +200,11 @@ static void untrack_node(unsigned int index) {
     superblock->free[bitset] |= 1ull << (local & 63);
     superblock->num_free += 1;
     // Add to victim buffer.
-    superblock->last_victim = (superblock->last_victim + 1) & VICTIM_MASK;
-    if (superblock->num_victim < VICTIM_MAX) {
-        superblock->num_victim += 1;
+    last_victim = (last_victim + 1) & VICTIM_MASK;
+    if (num_victim < VICTIM_MAX) {
+        num_victim += 1;
     }
-    superblock->victim[superblock->last_victim] = local;
+    victim[last_victim] = index;
     if (superblock_id < last_superblock) {
         last_superblock = superblock_id;
     }
