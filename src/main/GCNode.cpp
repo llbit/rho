@@ -112,14 +112,17 @@ inline int first_free(u64 bitset) {
 #endif
 }
 
-#define BITSET_ENTRIES (32)
+// VICTIM_MAX must be power of two.
+#define VICTIM_MAX (32)
+#define VICTIM_MASK (VICTIM_MAX - 1)
+#define BITSET_ENTRIES (128)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
 struct Superblock {
     unsigned char num_victim = 0;
     unsigned char last_victim = 0;
     unsigned short num_free = SUPERBLOCK_SIZE;
-    unsigned short victim[32];
+    unsigned short victim[VICTIM_MAX];
     volatile u64 free[BITSET_ENTRIES];
     NodeMetadata metadata[SUPERBLOCK_SIZE];
 
@@ -147,7 +150,7 @@ NodeMetadata* GCNode::get_metadata() const {
 static int next_free(Superblock* superblock) {
     if (superblock->num_victim > 0) {
         int index = superblock->victim[superblock->last_victim];
-        superblock->last_victim = (superblock->last_victim + 31) & 31;
+        superblock->last_victim = (superblock->last_victim + VICTIM_MASK) & VICTIM_MASK;
         superblock->num_victim -= 1;
         return index;
     } else if (superblock->num_free > 0) {
@@ -193,8 +196,8 @@ static void untrack_node(unsigned int index) {
     superblock->free[bitset] |= 1ull << (local & 63);
     superblock->num_free += 1;
     // Add to victim buffer.
-    superblock->last_victim = (superblock->last_victim + 1) & 31;
-    if (superblock->num_victim < 32) {
+    superblock->last_victim = (superblock->last_victim + 1) & VICTIM_MASK;
+    if (superblock->num_victim < VICTIM_MAX) {
         superblock->num_victim += 1;
     }
     superblock->victim[superblock->last_victim] = local;
@@ -423,16 +426,16 @@ void GCNode::sweep()
                         unsigned char& rcmms = metadata.rcmms;
                         if ((rcmms & s_mark_mask) != s_mark) {
                             int ref_count = (rcmms & s_refcount_mask) >> 1;
-                            rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                            /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
                             if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
                                 // The reference count has saturated.
                                 metadata.node->detachReferents();
                                 unmarked_and_saturated.push_back(metadata.node);
                             } else {
                                 metadata.node->detachReferents();
-                                rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
                                 if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
-                                    node->makeMoribund();
+                                    metadata.node->makeMoribund();
                                 }
                             }
                         }
