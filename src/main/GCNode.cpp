@@ -115,7 +115,7 @@ inline int first_free(u64 bitset) {
 // VICTIM_MAX must be power of two.
 #define VICTIM_MAX (1024)
 #define VICTIM_MASK (VICTIM_MAX - 1)
-#define BITSET_ENTRIES (128)
+#define BITSET_ENTRIES (256)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
 unsigned num_victim = 0;
