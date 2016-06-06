@@ -115,7 +115,7 @@ inline int first_free(u64 bitset) {
 // VICTIM_MAX must be power of two.
 #define VICTIM_MAX (2048)
 #define VICTIM_MASK (VICTIM_MAX - 1)
-#define BITSET_ENTRIES (256)
+#define BITSET_ENTRIES (128)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
 unsigned num_victim = 0;
@@ -357,6 +357,9 @@ void GCNode::gclite()
 void GCNode::initialize()
 {
     superblocks = new vector<Superblock*>();
+    for (int i = 0; i < 5; ++i) {
+        superblocks->push_back(new Superblock());
+    }
     s_moribund = new vector<const GCNode*>();
 
     // Initialize the Boehm GC.
