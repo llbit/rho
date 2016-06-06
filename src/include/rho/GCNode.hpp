@@ -68,7 +68,7 @@
 
 namespace rho { class GCNode; }
 struct NodeMetadata {
-    unsigned char rcmms;
+    unsigned char marked;
     rho::GCNode* node;
 };
 
@@ -131,9 +131,10 @@ namespace rho {
 	    virtual void operator()(const GCNode* node) = 0;
 	};
 
-	GCNode() {
-            NodeMetadata* metadata = get_metadata();
-            metadata->rcmms = s_mark | s_moribund_mask;
+	GCNode()
+            : m_rcmms(s_mark | s_moribund_mask)
+	{
+            mark_node();
 	    ++s_num_nodes;
 	    s_moribund->push_back(this);
 	}
@@ -254,8 +255,7 @@ namespace rho {
 	 */
 	virtual ~GCNode()
 	{
-            NodeMetadata* metadata = get_metadata();
-	    if (metadata->rcmms & s_moribund_mask)
+	    if (m_rcmms & s_moribund_mask)
 		destruct_aux();
 	    --s_num_nodes;
 	}
@@ -266,7 +266,7 @@ namespace rho {
 	friend class NodeStack;
 	friend class WeakRef;
 
-        NodeMetadata* get_metadata() const;
+        void mark_node() const;
 
 	/** Visitor class used to mark nodes.
 	 *
@@ -323,6 +323,7 @@ namespace rho {
 	static const unsigned char s_on_stack_mask = 0x1;
 
 	unsigned int m_node_index;
+	mutable unsigned char m_rcmms;
 	  // Refcount/moribund/marked/on_stack.  The least
 	  // significant bit is set if a pointer to this object is
 	  // known to be on the stack.
@@ -336,7 +337,7 @@ namespace rho {
 	static void gcliteImpl();
 
 	struct CreateAMinimallyInitializedGCNode;
-	GCNode(unsigned int node_index): m_node_index(node_index) {}
+	GCNode(unsigned int node_index);
 	GCNode(const GCNode&) = delete;
 	GCNode& operator=(const GCNode&) = delete;
 
@@ -357,14 +358,14 @@ namespace rho {
 	 * unset.   If the stack bits are up to date then this only returns
 	 * true for unreferenced nodes that can be deleted.
 	 */
-	bool maybeGarbage() const {
-            NodeMetadata* metadata = get_metadata();
-	    return (metadata->rcmms & (s_refcount_mask | s_on_stack_mask)) == 0;
+	bool maybeGarbage() const
+	{
+	    return (m_rcmms & (s_refcount_mask | s_on_stack_mask)) == 0;
 	}
 	// Returns the stored reference count.
-	unsigned char getRefCount() const {
-            NodeMetadata* metadata = get_metadata();
-	    return (metadata->rcmms & s_refcount_mask) >> 1;
+	unsigned char getRefCount() const
+	{
+	    return (m_rcmms & s_refcount_mask) >> 1;
 	}
 
 	// Decrement the reference count (subject to the stickiness of
@@ -373,8 +374,7 @@ namespace rho {
 	static void decRefCount(const GCNode* node)
 	{
 	    if (node) {
-                NodeMetadata* metadata = node->get_metadata();
-		unsigned char& rcmms = metadata->rcmms;
+		unsigned char& rcmms = node->m_rcmms;
 		rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
 		if ((rcmms &
 		     (s_refcount_mask | s_on_stack_mask| s_moribund_mask)) == 0)
@@ -383,14 +383,12 @@ namespace rho {
 	}
 
 	void setOnStackBit() const {
-            NodeMetadata* metadata = get_metadata();
-	    metadata->rcmms |= s_on_stack_mask;
+	    m_rcmms |= s_on_stack_mask;
 	}
 
 	void clearOnStackBit() const {
-            NodeMetadata* metadata = get_metadata();
-	    metadata->rcmms &= static_cast<unsigned char>(~s_on_stack_mask);
-	    if ((metadata->rcmms & (s_refcount_mask | s_moribund_mask)) == 0) {
+	    m_rcmms = m_rcmms & static_cast<unsigned char>(~s_on_stack_mask);
+	    if ((m_rcmms & (s_refcount_mask | s_moribund_mask)) == 0) {
                 // Clearing stack bits only happens when removing a stack barrier, so
                 // the object still exists on the stack and we can only add it to the
                 // moribund list here.
@@ -399,8 +397,7 @@ namespace rho {
 	}
 
 	bool isOnStackBitSet() const {
-            NodeMetadata* metadata = get_metadata();
-	    return metadata->rcmms & s_on_stack_mask;
+	    return m_rcmms & s_on_stack_mask;
 	}
 
 
@@ -418,8 +415,7 @@ namespace rho {
 	static void incRefCount(const GCNode* node)
 	{
 	    if (node) {
-                NodeMetadata* metadata = node->get_metadata();
-		unsigned char& rcmms = metadata->rcmms;
+		unsigned char& rcmms = node->m_rcmms;
 		rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
 	    }
 	}
@@ -435,8 +431,7 @@ namespace rho {
 
 	bool isMarked() const
 	{
-            NodeMetadata* metadata = get_metadata();
-	    return (metadata->rcmms & s_mark_mask) == s_mark;
+	    return (m_rcmms & s_mark_mask) == s_mark;
 	}
 
 	/** @brief Mark this node as moribund or delete if the stack bit is correct.

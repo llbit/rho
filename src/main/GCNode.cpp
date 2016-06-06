@@ -142,9 +142,9 @@ static unsigned int last_superblock = 0;
 // Allocated on dynamically to avoid messy cleanup.
 static std::vector<Superblock*>* superblocks;
 
-NodeMetadata* GCNode::get_metadata() const {
+void GCNode::mark_node() const {
     Superblock* superblock = (*superblocks)[m_node_index / SUPERBLOCK_SIZE];
-    return &(superblock->metadata[m_node_index % SUPERBLOCK_SIZE]);
+    superblock->metadata[m_node_index % SUPERBLOCK_SIZE].marked = s_mark;
 }
 
 static int next_free(Superblock* superblock) {
@@ -169,7 +169,6 @@ static int next_free(Superblock* superblock) {
 static void alloc_node(Superblock* superblock, GCNode* node, int index) {
     //assert(superblock->num_free > 0);
     superblock->free[index / 64] &= ~(1ull << (index & 63));
-    superblock->metadata[index].rcmms = 2; // Minimally initialized.
     superblock->metadata[index].node = node;
     superblock->num_free -= 1;
 }
@@ -260,6 +259,9 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     return result;
 }
 
+GCNode::GCNode(unsigned int node_index) : m_rcmms(s_decinc_refcount[1]), m_node_index(node_index) {
+}
+
 void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
@@ -278,8 +280,7 @@ bool GCNode::check()
 {
     // Check moribund list:
     for (const GCNode* node: *s_moribund) {
-        NodeMetadata* metadata = node->get_metadata();
-	if (!(metadata->rcmms & s_moribund_mask)) {
+	if (!(node->m_rcmms & s_moribund_mask)) {
 	    cerr << "GCNode::check() : "
 		"Node on moribund list without moribund bit set.\n";
 	    abort();
@@ -339,10 +340,9 @@ void GCNode::gclite()
     while (!s_moribund->empty()) {
 	// Last in, first out, for cache efficiency:
 	const GCNode* node = s_moribund->back();
-        NodeMetadata* metadata = node->get_metadata();
 	s_moribund->pop_back();
 	// Clear moribund bit.  Beware ~ promotes to unsigned int.
-	metadata->rcmms &= static_cast<unsigned char>(~s_moribund_mask);
+	node->m_rcmms &= static_cast<unsigned char>(~s_moribund_mask);
 
 	if (node->maybeGarbage())
 	    delete node;
@@ -383,8 +383,7 @@ void GCNode::makeMoribund() const
 
 void GCNode::addToMoribundList() const
 {
-    NodeMetadata* metadata = get_metadata();
-    metadata->rcmms |= s_moribund_mask;
+    m_rcmms |= s_moribund_mask;
     s_moribund->push_back(this);
 }
 
@@ -425,8 +424,8 @@ void GCNode::sweep()
                 for (int bit = 0; bit < 64; ++bit) {
                     if (!(superblock->free[i] & (1ull << bit))) {
                         NodeMetadata& metadata = superblock->metadata[index + bit];
-                        unsigned char& rcmms = metadata.rcmms;
-                        if ((rcmms & s_mark_mask) != s_mark) {
+                        if (metadata.marked != s_mark) {
+                            unsigned char& rcmms = metadata.node->m_rcmms;
                             int ref_count = (rcmms & s_refcount_mask) >> 1;
                             /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
                             if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
@@ -459,10 +458,10 @@ void GCNode::Marker::operator()(const GCNode* node)
     if (node->isMarked()) {
 	return;
     }
+    node->mark_node();
     // Update mark  Beware ~ promotes to unsigned int.
-    NodeMetadata* metadata = node->get_metadata();
-    metadata->rcmms &= static_cast<unsigned char>(~s_mark_mask);
-    metadata->rcmms |= s_mark;
+    node->m_rcmms &= static_cast<unsigned char>(~s_mark_mask);
+    node->m_rcmms |= s_mark;
     node->visitReferents(this);
 }
 
@@ -503,11 +502,11 @@ GCNode* GCNode::asGCNode(void* candidate_pointer)
 }
 
 GCNode::InternalData GCNode::storeInternalData() const {
-    return get_metadata()->rcmms;
+    return m_rcmms;
 }
 
 void GCNode::restoreInternalData(InternalData data) {
-    get_metadata()->rcmms = data;
+    m_rcmms = data;
 }
 
 #ifdef HAVE_ADDRESS_SANITIZER
