@@ -115,7 +115,7 @@ inline int first_free(u64 bitset) {
 // VICTIM_MAX must be power of two.
 #define VICTIM_MAX (1024)
 #define VICTIM_MASK (VICTIM_MAX - 1)
-#define BITSET_ENTRIES (256)
+#define BITSET_ENTRIES (128)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
 unsigned num_victim = 0;
@@ -424,22 +424,24 @@ void GCNode::sweep()
         if (superblock->num_free != SUPERBLOCK_SIZE) {
             int index = 0;
             for (int i = 0; i < BITSET_ENTRIES; ++i) {
-                for (int bit = 0; bit < 64; ++bit) {
-                    if (!(superblock->free[i] & (1ull << bit))) {
-                        NodeMetadata& metadata = superblock->metadata[index + bit];
-                        if (metadata.marked != s_mark) {
-                            unsigned char& rcmms = metadata.node->m_rcmms;
-                            int ref_count = (rcmms & s_refcount_mask) >> 1;
-                            /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
-                            if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
-                                // The reference count has saturated.
-                                metadata.node->detachReferents();
-                                unmarked_and_saturated.push_back(metadata.node);
-                            } else {
-                                metadata.node->detachReferents();
-                                /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
-                                if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
-                                    metadata.node->makeMoribund();
+                if (superblock->free[i] != ~0ull) {
+                    for (int bit = 0; bit < 64; ++bit) {
+                        if (!(superblock->free[i] & (1ull << bit))) {
+                            NodeMetadata& metadata = superblock->metadata[index + bit];
+                            if (metadata.marked != s_mark) {
+                                unsigned char& rcmms = metadata.node->m_rcmms;
+                                int ref_count = (rcmms & s_refcount_mask) >> 1;
+                                /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                                if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
+                                    // The reference count has saturated.
+                                    metadata.node->detachReferents();
+                                    unmarked_and_saturated.push_back(metadata.node);
+                                } else {
+                                    metadata.node->detachReferents();
+                                    /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                    if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
+                                        metadata.node->makeMoribund();
+                                    }
                                 }
                             }
                         }
