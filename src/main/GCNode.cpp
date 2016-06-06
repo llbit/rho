@@ -406,23 +406,6 @@ static GCNode* getNodePointerFromAllocation(void* allocation)
 	get_object_pointer_from_allocation(allocation));
 }
 
-void GCNode::detachReferentsOfObjectIfUnmarked(GCNode* object,
-					       vector<GCNode*> *unmarked_and_saturated)
-{
-    if (!object->isMarked()) {
-	int ref_count = object->getRefCount();
-	incRefCount(object);
-	if (object->getRefCount() == ref_count) {
-	    // The reference count has saturated.
-	    object->detachReferents();
-	    unmarked_and_saturated->push_back(object);
-	} else {
-	    object->detachReferents();
-	    decRefCount(object);
-	}
-    }
-}
-
 void GCNode::sweep()
 {
     // Detach the referents of nodes that haven't been marked.
@@ -439,13 +422,18 @@ void GCNode::sweep()
                         NodeMetadata& metadata = superblock->metadata[index + bit];
                         unsigned char& rcmms = metadata.rcmms;
                         if ((rcmms & s_mark_mask) != s_mark) {
-                            int ref_count = rcmms & s_refcount_mask;
-                            if (ref_count == s_refcount_mask) {
+                            int ref_count = (rcmms & s_refcount_mask) >> 1;
+                            rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                            if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
                                 // The reference count has saturated.
                                 metadata.node->detachReferents();
                                 unmarked_and_saturated.push_back(metadata.node);
                             } else {
                                 metadata.node->detachReferents();
+                                rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
+                                    node->makeMoribund();
+                                }
                             }
                         }
                     }
