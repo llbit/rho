@@ -66,13 +66,6 @@
  * TODO(kmillar): implement cycle breaking for closures.
  */
 
-namespace rho { class GCNode; }
-struct NodeMetadata {
-    unsigned char marked;
-    rho::GCNode* node;
-};
-
-
 namespace rho {
     /** @brief Base class for objects managed by the garbage collector.
      *
@@ -317,10 +310,10 @@ namespace rho {
 	  // corresponding bit of s_mark.  (Only this bit will ever be
 	  // set in s_mark.)
 
-	static const unsigned char s_mark_mask = 0x80;
+	static const unsigned char s_mark_mask = 0x01;
 	static const unsigned char s_moribund_mask = 0x40;
 	static const unsigned char s_refcount_mask = 0x3e;
-	static const unsigned char s_on_stack_mask = 0x1;
+	static const unsigned char s_on_stack_mask = 0x80;
 
 	unsigned int m_node_index;
 	mutable unsigned char m_rcmms;
