@@ -128,13 +128,19 @@ struct Superblock {
             free[i] = ~0ull;
         }
     }
+
+    ~Superblock() {
+        error("Should not free superblocks.");
+    }
 };
 
 static unsigned int last_superblock = 0;
-static std::vector<Superblock*> superblocks;
+
+// Allocated on dynamically to avoid messy cleanup.
+static std::vector<Superblock*>* superblocks;
 
 NodeMetadata* GCNode::get_metadata() const {
-    Superblock* superblock = superblocks[m_node_index / SUPERBLOCK_SIZE];
+    Superblock* superblock = (*superblocks)[m_node_index / SUPERBLOCK_SIZE];
     return &(superblock->metadata[m_node_index % SUPERBLOCK_SIZE]);
 }
 
@@ -164,16 +170,16 @@ static void alloc_node(Superblock* superblock, GCNode* node, int index) {
 }
 
 static unsigned int track_node(GCNode* node) {
-    while (last_superblock < superblocks.size()) {
-        int next = next_free(superblocks[last_superblock]);
+    while (last_superblock < superblocks->size()) {
+        int next = next_free((*superblocks)[last_superblock]);
         if (next >= 0) {
-            alloc_node(superblocks[last_superblock], node, next);
+            alloc_node((*superblocks)[last_superblock], node, next);
             return last_superblock * SUPERBLOCK_SIZE + next;
         }
         last_superblock += 1;
     }
     Superblock* superblock = new Superblock();
-    superblocks.push_back(superblock);
+    superblocks->push_back(superblock);
     alloc_node(superblock, node, 0);
     return last_superblock * SUPERBLOCK_SIZE;
 }
@@ -181,7 +187,7 @@ static unsigned int track_node(GCNode* node) {
 /** @brief Mark the specified node as free. */
 static void untrack_node(unsigned int index) {
     unsigned int superblock_id = index / SUPERBLOCK_SIZE;
-    Superblock* superblock = superblocks[superblock_id];
+    Superblock* superblock = (*superblocks)[superblock_id];
     unsigned int local = index % SUPERBLOCK_SIZE;
     unsigned int bitset = local / 64;
     superblock->free[bitset] |= 1ull << (local & 63);
@@ -342,6 +348,7 @@ void GCNode::gclite()
 
 void GCNode::initialize()
 {
+    superblocks = new vector<Superblock*>();
     s_moribund = new vector<const GCNode*>();
 
     // Initialize the Boehm GC.
@@ -423,7 +430,7 @@ void GCNode::sweep()
     // and they will have been deleted unless their reference count is
     // saturated.
     vector<GCNode*> unmarked_and_saturated;
-    for (auto superblock : superblocks) {
+    for (auto superblock : *superblocks) {
         if (superblock->num_free != SUPERBLOCK_SIZE) {
             int index = 0;
             for (int i = 0; i < BITSET_ENTRIES; ++i) {
