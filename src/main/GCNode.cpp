@@ -115,7 +115,7 @@ inline int first_free(u64 bitset) {
 // VICTIM_MAX must be power of two.
 #define VICTIM_MAX (32)
 #define VICTIM_MASK (VICTIM_MAX - 1)
-#define BITSET_ENTRIES (128)
+#define BITSET_ENTRIES (1024)
 #define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
 
 unsigned num_victim = 0;
@@ -123,7 +123,7 @@ unsigned last_victim = 0;
 unsigned victim[VICTIM_MAX];
 
 struct Superblock {
-    unsigned short num_free = SUPERBLOCK_SIZE;
+    unsigned num_free = SUPERBLOCK_SIZE;
     volatile u64 free[BITSET_ENTRIES];
     NodeMetadata metadata[SUPERBLOCK_SIZE];
 
