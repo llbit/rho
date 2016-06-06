@@ -455,8 +455,6 @@ namespace rho {
 	static void detachReferentsOfObjectIfUnmarked(GCNode*,
 						      std::vector<GCNode*>*);
 
-	static void applyToAllAllocatedNodes(std::function<void(GCNode*)>);
-
 	friend class GCEdgeBase;
 	friend class GCTestHelper;
 

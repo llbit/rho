@@ -120,7 +120,7 @@ struct Superblock {
     unsigned char last_victim = 0;
     unsigned short num_free = SUPERBLOCK_SIZE;
     unsigned short victim[32];
-    u64 free[BITSET_ENTRIES];
+    volatile u64 free[BITSET_ENTRIES];
     NodeMetadata metadata[SUPERBLOCK_SIZE];
 
     Superblock() {
@@ -423,38 +423,36 @@ void GCNode::sweep()
     // and they will have been deleted unless their reference count is
     // saturated.
     vector<GCNode*> unmarked_and_saturated;
-    applyToAllAllocatedNodes([&](GCNode* node) {
-	    detachReferentsOfObjectIfUnmarked(node, &unmarked_and_saturated);
-	});
+    for (auto superblock : superblocks) {
+        if (superblock->num_free != SUPERBLOCK_SIZE) {
+            int index = 0;
+            for (int i = 0; i < BITSET_ENTRIES; ++i) {
+                for (int bit = 0; bit < 64; ++bit) {
+                    if (!(superblock->free[i] & (1ull << bit))) {
+                        NodeMetadata& metadata = superblock->metadata[index + bit];
+                        unsigned char& rcmms = metadata.rcmms;
+                        if ((rcmms & s_mark_mask) != s_mark) {
+                            int ref_count = (rcmms & s_refcount_mask) >> 1;
+                            if (ref_count == 0x1F) {
+                                // The reference count has saturated.
+                                metadata.node->detachReferents();
+                                unmarked_and_saturated.push_back(metadata.node);
+                            } else {
+                                metadata.node->detachReferents();
+                            }
+                        }
+                    }
+                }
+                index += 64;
+            }
+        }
+    }
     // At this point, the only unmarked objects are GCNodes with saturated
     // reference counts.  Delete them.
     for (GCNode* node : unmarked_and_saturated) {
 	delete node;
     }
 }
-
-static void applyToAllAllocatedNodesInBlock(struct hblk* block, GC_word fn)
-{
-    auto function = reinterpret_cast<std::function<void(GCNode*)>*>(fn);
-    hdr* block_header = HDR(block);
-    size_t object_size = block_header->hb_sz;
-    char *start = block->hb_body;
-    char* end = start + HBLKSIZE - object_size + 1;
-    
-    for (char* allocation = start; allocation < end; allocation += object_size)
-    {
-	if (test_allocated_bit(allocation)) {
-	    (*function)(getNodePointerFromAllocation(allocation));
-	}
-    }
-}
-
-void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
-{
-    GC_apply_to_all_blocks(
-	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
-}
-
 
 void GCNode::Marker::operator()(const GCNode* node)
 {
