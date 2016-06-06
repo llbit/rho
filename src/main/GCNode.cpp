@@ -148,17 +148,19 @@ NodeMetadata* GCNode::get_metadata() const {
 }
 
 static int next_free(Superblock* superblock) {
+    if (superblock->num_free == 0) {
+        return -1;
+    }
     if (superblock->num_victim > 0) {
         int index = superblock->victim[superblock->last_victim];
         superblock->last_victim = (superblock->last_victim + VICTIM_MASK) & VICTIM_MASK;
         superblock->num_victim -= 1;
         return index;
-    } else if (superblock->num_free > 0) {
-        for (int i = 0; i < BITSET_ENTRIES; ++i) {
-            int index = first_free(superblock->free[i]);
-            if (index >= 0) {
-                return i * 64 + index;
-            }
+    }
+    for (int i = 0; i < BITSET_ENTRIES; ++i) {
+        int index = first_free(superblock->free[i]);
+        if (index >= 0) {
+            return i * 64 + index;
         }
     }
     return -1;
