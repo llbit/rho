@@ -439,8 +439,8 @@ void GCNode::sweep()
                         NodeMetadata& metadata = superblock->metadata[index + bit];
                         unsigned char& rcmms = metadata.rcmms;
                         if ((rcmms & s_mark_mask) != s_mark) {
-                            int ref_count = (rcmms & s_refcount_mask) >> 1;
-                            if (ref_count == 0x1F) {
+                            int ref_count = rcmms & s_refcount_mask;
+                            if (ref_count == s_refcount_mask) {
                                 // The reference count has saturated.
                                 metadata.node->detachReferents();
                                 unmarked_and_saturated.push_back(metadata.node);
