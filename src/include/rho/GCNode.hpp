@@ -127,7 +127,6 @@ namespace rho {
 	GCNode()
             : m_rcmms(s_mark | s_moribund_mask)
 	{
-            mark_node();
 	    ++s_num_nodes;
 	    s_moribund->push_back(this);
 	}
@@ -239,6 +238,11 @@ namespace rho {
 	// Otherwise returns nullptr.
 	static GCNode* asGCNode(void* candidate_pointer);
 
+	static unsigned char s_mark;  // During garbage collection, a
+	  // node is considered marked if its s_mark_mask bit matches the
+	  // corresponding bit of s_mark.  (Only this bit will ever be
+	  // set in s_mark.)
+
     protected:
 	/**
 	 * @note The destructor is protected to ensure that GCNode
@@ -305,10 +309,6 @@ namespace rho {
 	// reference count.  Patterns 0, 2, 4, ... are used to
 	// decrement; 1, 3, 5, .. to increment.
 	static const unsigned char s_decinc_refcount[];
-	static unsigned char s_mark;  // During garbage collection, a
-	  // node is considered marked if its s_mark_mask bit matches the
-	  // corresponding bit of s_mark.  (Only this bit will ever be
-	  // set in s_mark.)
 
 	static const unsigned char s_mark_mask = 0x01;
 	static const unsigned char s_moribund_mask = 0x40;
@@ -440,8 +440,6 @@ namespace rho {
 	/** @brief Carry out the sweep phase of garbage collection.
 	 */
 	static void sweep();
-	static void detachReferentsOfObjectIfUnmarked(GCNode*,
-						      std::vector<GCNode*>*);
 
 	friend class GCEdgeBase;
 	friend class GCTestHelper;

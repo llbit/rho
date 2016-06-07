@@ -166,7 +166,7 @@ static int next_free(Superblock* superblock) {
 static void alloc_node(Superblock* superblock, GCNode* node, int index) {
     //assert(superblock->num_free > 0);
     superblock->free[index / 64] &= ~(1ull << (index & 63));
-    superblock->metadata[index] = (uintptr_t) node;
+    superblock->metadata[index] = (uintptr_t) node | GCNode::s_mark; // Marked by default to avoid collection before the object is traversable from the stack. TODO: is this needed??
     superblock->num_free -= 1;
 }
 
@@ -426,12 +426,13 @@ void GCNode::sweep()
     vector<GCNode*> unmarked_and_saturated;
     for (auto superblock : *superblocks) {
         if (superblock->num_free != SUPERBLOCK_SIZE) {
-            int index = 0;
+            int offset = 0;
             for (int i = 0; i < BITSET_ENTRIES; ++i) {
-                if (superblock->free[i] != ~0ull) {
-                    for (int bit = 0; bit < 64; ++bit) {
+#if 1
+                if ((superblock->free[i] & 0xFFFFFFFFull) != 0xFFFFFFFFull) {
+                    for (int bit = 0; bit < 32; ++bit) {
                         if (!(superblock->free[i] & (1ull << bit))) {
-                            uintptr_t metadata = superblock->metadata[index + bit];
+                            uintptr_t metadata = superblock->metadata[offset + bit];
                             if ((metadata & 1) != s_mark) {
                                 GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
                                 unsigned char& rcmms = node->m_rcmms;
@@ -452,7 +453,57 @@ void GCNode::sweep()
                         }
                     }
                 }
-                index += 64;
+                if ((superblock->free[i] & 0xFFFFFFFF00000000ull) != 0xFFFFFFFF00000000ull) {
+                    for (int bit = 32; bit < 64; ++bit) {
+                        if (!(superblock->free[i] & (1ull << bit))) {
+                            uintptr_t metadata = superblock->metadata[offset + bit];
+                            if ((metadata & 1) != s_mark) {
+                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
+                                unsigned char& rcmms = node->m_rcmms;
+                                int ref_count = (rcmms & s_refcount_mask) >> 1;
+                                /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                                if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
+                                    // The reference count has saturated.
+                                    node->detachReferents();
+                                    unmarked_and_saturated.push_back(node);
+                                } else {
+                                    node->detachReferents();
+                                    /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                    if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
+                                        node->makeMoribund();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+#else
+                if (superblock->free[i] != ~0ull) {
+                    for (int bit = 0; bit < 64; ++bit) {
+                        if (!(superblock->free[i] & (1ull << bit))) {
+                            uintptr_t metadata = superblock->metadata[offset + bit];
+                            if ((metadata & 1) != s_mark) {
+                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
+                                unsigned char& rcmms = node->m_rcmms;
+                                int ref_count = (rcmms & s_refcount_mask) >> 1;
+                                /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                                if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
+                                    // The reference count has saturated.
+                                    node->detachReferents();
+                                    unmarked_and_saturated.push_back(node);
+                                } else {
+                                    node->detachReferents();
+                                    /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                    if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
+                                        node->makeMoribund();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+#endif
+                offset += 64;
             }
         }
     }
