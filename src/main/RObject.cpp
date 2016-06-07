@@ -81,7 +81,10 @@ RObject::RObject(const RObject& pattern)
       m_argused(pattern.m_argused), m_active_binding(pattern.m_active_binding),
       m_binding_locked(pattern.m_binding_locked)
 {
-    m_attrib = clone(pattern.m_attrib.get());
+    if (pattern.m_attrib.get()) {
+        m_attrib = clone(pattern.m_attrib.get());
+        mark_attributed();
+    }
     maybeTraceMemory(&pattern);
 }
 
@@ -91,6 +94,7 @@ void RObject::clearAttributes()
 	m_attrib = nullptr;
 	// Beware promotion to int by ~:
 	m_type &= static_cast<signed char>(~s_class_mask);
+        mark_unattributed();
     }
 }
 
@@ -145,6 +149,9 @@ void RObject::setAttribute(const Symbol* name, RObject* value)
 	if (value == nullptr)
 	    m_type &= static_cast<signed char>(~s_class_mask);
 	else m_type |= static_cast<signed char>(s_class_mask);
+    }
+    if (!m_attrib) {
+        mark_attributed();
     }
     // Find attribute:
     PairList* prev = nullptr;

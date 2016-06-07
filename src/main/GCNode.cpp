@@ -149,6 +149,20 @@ void GCNode::mark_node() const {
     superblock->metadata[index] = (superblock->metadata[index] & ~((uintptr_t) 1)) | s_mark;
 }
 
+// Set attributed bit.
+void GCNode::mark_attributed() const {
+    Superblock* superblock = (*superblocks)[m_node_index / SUPERBLOCK_SIZE];
+    unsigned index = m_node_index % SUPERBLOCK_SIZE;
+    superblock->metadata[index] |= 2;
+}
+
+// Clears attributed bit.
+void GCNode::mark_unattributed() const {
+    Superblock* superblock = (*superblocks)[m_node_index / SUPERBLOCK_SIZE];
+    unsigned index = m_node_index % SUPERBLOCK_SIZE;
+    superblock->metadata[index] = superblock->metadata[index] & ~((uintptr_t) 2);
+}
+
 static int next_free(Superblock* superblock) {
     if (superblock->num_free == 0) {
         return -1;
@@ -428,7 +442,7 @@ void GCNode::sweep()
         if (superblock->num_free != SUPERBLOCK_SIZE) {
             int offset = 0;
             for (int i = 0; i < BITSET_ENTRIES; ++i) {
-#if 1
+#if 0
                 if ((superblock->free[i] & 0xFFFFFFFFull) != 0xFFFFFFFFull) {
                     for (int bit = 0; bit < 32; ++bit) {
                         if (!(superblock->free[i] & (1ull << bit))) {
@@ -482,20 +496,28 @@ void GCNode::sweep()
                     for (int bit = 0; bit < 64; ++bit) {
                         if (!(superblock->free[i] & (1ull << bit))) {
                             uintptr_t metadata = superblock->metadata[offset + bit];
-                            if ((metadata & 1) != s_mark) {
-                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
-                                unsigned char& rcmms = node->m_rcmms;
-                                int ref_count = (rcmms & s_refcount_mask) >> 1;
-                                /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
-                                if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
-                                    // The reference count has saturated.
-                                    node->detachReferents();
-                                    unmarked_and_saturated.push_back(node);
+                            uintptr_t mark = metadata & 1;
+                            if (mark != s_mark) {
+                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 3));
+                                uintptr_t attributed = metadata & 2;
+                                if (!attributed) {
+                                    // Fast delete.
+                                    delete node;
                                 } else {
-                                    node->detachReferents();
-                                    /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
-                                    if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
-                                        node->makeMoribund();
+                                    // Full delete and detach referents.
+                                    unsigned char& rcmms = node->m_rcmms;
+                                    int ref_count = (rcmms & s_refcount_mask) >> 1;
+                                    /* increase refcount */ rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
+                                    if (((rcmms & s_refcount_mask) >> 1) == ref_count) {
+                                        // The reference count has saturated.
+                                        node->detachReferents();
+                                        unmarked_and_saturated.push_back(node);
+                                    } else {
+                                        node->detachReferents();
+                                        /* decrease refcount */ rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
+                                        if ((rcmms & (s_refcount_mask | s_on_stack_mask | s_moribund_mask)) == 0) {
+                                            node->makeMoribund();
+                                        }
                                     }
                                 }
                             }

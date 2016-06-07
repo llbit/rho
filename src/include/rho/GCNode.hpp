@@ -242,6 +242,8 @@ namespace rho {
 	  // node is considered marked if its s_mark_mask bit matches the
 	  // corresponding bit of s_mark.  (Only this bit will ever be
 	  // set in s_mark.)
+        void mark_unattributed() const;
+        void mark_attributed() const;
 
     protected:
 	/**

@@ -523,8 +523,9 @@ namespace rho {
 	explicit RObject(SEXPTYPE stype = CXXSXP)
 	    : m_type(stype & s_sexptype_mask), m_named(0),
 	      m_memory_traced(false), m_missing(0), m_argused(0),
-	      m_active_binding(false), m_binding_locked(false)
-	{}
+	      m_active_binding(false), m_binding_locked(false) {
+            mark_unattributed();
+        }
 
 	/** @brief Copy constructor.
 	 *
