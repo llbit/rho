@@ -506,7 +506,9 @@ void GCNode::sweep()
                                         error("trying to fast delete referenced node");
                                     }
                                     untrack_node(offset + bit);
-                                    delete node; // TODO fixme
+                                    // FIXME: update allocated bytes count to account for freed memory!!
+                                    clear_allocated_bit(node);
+                                    GC_free(node);
                                 } else {
                                     // Full delete and detach referents.
                                     unsigned char& rcmms = node->m_rcmms;
