@@ -411,6 +411,10 @@ namespace rho {
 	{
 	    if (node) {
 		unsigned char& rcmms = node->m_rcmms;
+                if (!(rcmms & s_refcount_mask)) {
+                    // Moving from 0 refs to 1+ refs.
+                    node->mark_attributed();
+                }
 		rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
 	    }
 	}

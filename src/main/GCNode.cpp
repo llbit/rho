@@ -502,7 +502,11 @@ void GCNode::sweep()
                                 uintptr_t attributed = metadata & 2;
                                 if (!attributed) {
                                     // Fast delete.
-                                    delete node;
+                                    if (node->m_rcmms & s_refcount_mask) {
+                                        error("trying to fast delete referenced node");
+                                    }
+                                    untrack_node(offset + bit);
+                                    delete node; // TODO fixme
                                 } else {
                                     // Full delete and detach referents.
                                     unsigned char& rcmms = node->m_rcmms;
