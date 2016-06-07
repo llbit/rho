@@ -43,6 +43,15 @@ namespace rho {
 	/** @brief Null the encapsulated pointer.
 	 */
 	void detach();
+
+        /** @brief Retarget a GCNode reference. */
+        template <class T = RObject>
+	static void retarget(T*& target, T* newtarget) {
+	    const GCNode* oldtarget = target;
+	    GCNode::incRefCount(newtarget);
+            target = newtarget;
+	    GCNode::decRefCount(oldtarget);
+	}
     protected:
 	GCEdgeBase()
 	    : m_target(nullptr)

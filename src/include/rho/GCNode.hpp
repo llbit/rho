@@ -252,6 +252,7 @@ namespace rho {
 	    --s_num_nodes;
 	}
     private:
+	friend class RObject;
 	friend class GCRootBase;
 	friend class GCStackFrameBoundary;
 	friend class GCStackRootBase;

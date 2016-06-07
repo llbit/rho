@@ -81,7 +81,10 @@ RObject::RObject(const RObject& pattern)
       m_argused(pattern.m_argused), m_active_binding(pattern.m_active_binding),
       m_binding_locked(pattern.m_binding_locked)
 {
-    m_attrib = clone(pattern.m_attrib.get());
+    if (pattern.m_attrib) {
+        m_attrib = pattern.m_attrib->clone();
+        GCNode::incRefCount(m_attrib);
+    }
     maybeTraceMemory(&pattern);
 }
 
@@ -89,6 +92,7 @@ void RObject::clearAttributes()
 {
     if (m_attrib) {
 	m_attrib = nullptr;
+        GCNode::decRefCount(m_attrib);
 	// Beware promotion to int by ~:
 	m_type &= static_cast<signed char>(~s_class_mask);
     }
@@ -120,9 +124,11 @@ RObject* RObject::evaluate(Environment* env)
 
 RObject* RObject::getAttribute(const Symbol* name) const
 {
-    for (PairList* node = m_attrib; node; node = node->tail())
-	if (node->tag() == name)
+    for (PairList* node = m_attrib; node; node = node->tail()) {
+	if (node->tag() == name) {
 	    return node->car();
+        }
+    }
     return nullptr;
 }
 
@@ -155,19 +161,21 @@ void RObject::setAttribute(const Symbol* name, RObject* value)
     }
     if (node) {  // Attribute already present
 	// Update existing attribute:
-	if (value)
+	if (value) {
 	    node->setCar(value);
 	// Delete existing attribute:
-	else if (prev)
+        } else if (prev) {
 	    prev->setTail(node->tail());
-	else m_attrib = node->tail();
+        } else {
+            GCEdgeBase::retarget(m_attrib, node->tail());
+        }
     } else if (value) {  
 	// Create new node:
 	PairList* newnode = PairList::cons(value, nullptr, name);
-	if (prev)
+	if (prev) {
 	    prev->setTail(newnode);
-	else { // No preexisting attributes at all:
-	    m_attrib = newnode;
+        } else { // No preexisting attributes at all:
+            GCEdgeBase::retarget(m_attrib, newnode);
 	}
     }
 }

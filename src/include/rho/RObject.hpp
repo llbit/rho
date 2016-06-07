@@ -512,7 +512,8 @@ namespace rho {
 	// Virtual functions of GCNode:
 	void detachReferents() override
 	{
-	    m_attrib.detach();
+            GCNode::decRefCount((GCNode*) m_attrib); // Need to cast because we only have forward decl of PairList.
+            m_attrib = nullptr;
 	}
 
 	void visitReferents(const_visitor* v) const override;
@@ -582,7 +583,7 @@ namespace rho {
 	bool m_active_binding : 1;
 	bool m_binding_locked : 1;
     private:
-	GCEdge<PairList> m_attrib;
+	PairList* m_attrib = nullptr;
 
 #ifdef R_MEMORY_PROFILING
 	// This function implements maybeTraceMemory() (qv.) when
