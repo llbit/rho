@@ -72,16 +72,13 @@ namespace rho {
 	~GCRootBase()
 	{
 	    const GCNode* node = ptr();
-	    GCNode::decRefCount(node);
 	    unlink();
 	}
 
 	GCRootBase& operator=(const GCRootBase& source)
 	{
 	    const GCNode* newnode = source.ptr();
-	    GCNode::incRefCount(newnode);
 	    const GCNode* oldnode = ptr();
-	    GCNode::decRefCount(oldnode);
 	    m_pointer = newnode;
 	    return *this;
 	}
@@ -93,9 +90,7 @@ namespace rho {
 	 */
 	void redirect(const GCNode* node)
 	{
-	    GCNode::incRefCount(node);
 	    const GCNode* oldnode = ptr();
-	    GCNode::decRefCount(oldnode);
 	    m_pointer = node;
 	}
 

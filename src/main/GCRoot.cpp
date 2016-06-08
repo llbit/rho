@@ -56,7 +56,6 @@ GCRootBase::GCRootBase(const GCNode* node)
     s_list_head = this;
 
     m_pointer = node;
-    GCNode::incRefCount(ptr());
 }
 
 void GCRootBase::visitRoots(GCNode::const_visitor* v)

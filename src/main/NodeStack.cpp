@@ -65,7 +65,6 @@ void NodeStack::eraseTopmost(RObject* node)
     // See Josuttis p.267 for the need for -1 :
     std::vector<RObject*>::iterator it = rit.base() - 1;
     if (it - m_vector.begin() < int(m_protected_count)) {
-	GCNode::decRefCount(node);
 	--m_protected_count;
     }
     m_vector.erase(it);
@@ -90,9 +89,6 @@ void NodeStack::protectAll()
 {
     std::vector<RObject*>::iterator start
 	= m_vector.begin() + std::ptrdiff_t(m_protected_count);
-    std::vector<RObject*>::iterator end = m_vector.end();
-    for (std::vector<RObject*>::iterator it = start; it != end; ++it)
-	GCNode::incRefCount(*it);
     m_protected_count = m_vector.size();
 }
 
@@ -118,8 +114,6 @@ void (NodeStack::*nodeStackRetargetP)(RObject*, size_t) = &NodeStack::retarget;
 
 void NodeStack::retarget_aux(RObject* oldnode, RObject* newnode)
 {
-    GCNode::incRefCount(newnode);
-    GCNode::decRefCount(oldnode);
 }
 
 void NodeStack::resize_aux(size_t new_size)
@@ -127,7 +121,6 @@ void NodeStack::resize_aux(size_t new_size)
     m_vector.resize(m_protected_count);
     while (m_vector.size() > new_size) {
 	RObject* node = m_vector.back();
-	GCNode::decRefCount(node);
 	m_vector.pop_back();
     }
     m_protected_count = new_size;

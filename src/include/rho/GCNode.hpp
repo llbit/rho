@@ -322,29 +322,6 @@ namespace rho {
 
 	static void markSweepGC();
 
-	/** @brief Might this object be unreferenced garbage?
-	 *
-	 * Returns true if the reference count is zero and the stack bit is
-	 * unset.   If the stack bits are up to date then this only returns
-	 * true for unreferenced nodes that can be deleted.
-	 */
-	bool maybeGarbage() const
-	{
-	    return (m_rcmms & (s_refcount_mask | s_on_stack_mask)) == 0;
-	}
-	// Returns the stored reference count.
-	unsigned char getRefCount() const
-	{
-	    return 0;
-	}
-
-	// Decrement the reference count (subject to the stickiness of
-	// its MSB).  If as a result the reference count falls to
-	// zero, mark the node as moribund.
-	static void decRefCount(const GCNode* node)
-	{
-	}
-
 	void setOnStackBit() const {
 	    m_rcmms |= s_on_stack_mask;
 	}
@@ -357,7 +334,6 @@ namespace rho {
 	    return m_rcmms & s_on_stack_mask;
 	}
 
-
 	// Helper function for the destructor, handling the case where
 	// the node is still under construction.  This should happen
 	// only in the case where a derived class constructor has
@@ -365,14 +341,6 @@ namespace rho {
 #ifdef __GNUC__
 	__attribute__((cold))
 #endif
-	void destruct_aux();
-
-	// Increment the reference count.  Overflow is handled by the
-	// stickiness of the MSB.
-	static void incRefCount(const GCNode* node)
-	{
-	}
-
 	/** @brief Initialize the entire memory subsystem.
 	 *
 	 * This method must be called before any GCNodes are created.

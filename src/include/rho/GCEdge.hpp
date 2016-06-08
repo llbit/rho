@@ -55,12 +55,10 @@ namespace rho {
 	GCEdgeBase(const GCEdgeBase& source)
 	    : m_target(source.m_target)
 	{
-	    GCNode::incRefCount(m_target);
 	}
 	    
 	~GCEdgeBase()
 	{
-	    GCNode::decRefCount(m_target);
 	}
 
 	/** @brief Get target of this edge.
@@ -79,10 +77,8 @@ namespace rho {
          */
 	void retarget(const GCNode* newtarget)
 	{
-	    GCNode::incRefCount(newtarget);
 	    const GCNode* oldtarget = m_target;
 	    m_target = newtarget;
-	    GCNode::decRefCount(oldtarget);
 	}
     private:
 	const GCNode* m_target;

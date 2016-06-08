@@ -144,26 +144,17 @@ bool GCNode::check()
     return true;
 }
 
-void GCNode::destruct_aux()
-{
-}
-    
 extern RObject* R_Srcref;
 
 void GCNode::gc(bool markSweep)
 {
     if (GCManager::GCInhibitor::active())
 	return;
-    GCManager::GCInhibitor inhibitor;
-
-    ProtectStack::protectAll();
-    incRefCount(R_Srcref);
-
     if (markSweep) {
+        GCManager::GCInhibitor inhibitor;
+        ProtectStack::protectAll();
 	GCStackRootBase::withAllStackNodesProtected(markSweepGC);
     }
-
-    decRefCount(R_Srcref);
 }
 
 void GCNode::markSweepGC()

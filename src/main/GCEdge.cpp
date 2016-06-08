@@ -33,6 +33,5 @@ using namespace rho;
 
 void GCEdgeBase::detach()
 {
-    GCNode::decRefCount(m_target);
     m_target = nullptr;
 }
