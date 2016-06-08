@@ -208,7 +208,6 @@ void GCNode::mark()
     GCRootBase::visitRoots(&marker);
     GCStackRootBase::visitRoots(&marker);
     ProtectStack::visitRoots(&marker);
-    WeakRef::markThru();
     if (R_Srcref)
 	marker(R_Srcref);
 }
@@ -227,7 +226,6 @@ void GCNode::sweep()
     // saturated.
     applyToAllAllocatedNodes([&](GCNode* node) {
         if (!node->isMarked()) {
-            node->detachReferents();
             delete node;
         }
     });
