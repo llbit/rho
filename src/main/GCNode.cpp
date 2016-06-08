@@ -65,6 +65,8 @@ const unsigned char GCNode::s_decinc_refcount[]
    0x1e, 2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 0,    0};
 
 unsigned char GCNode::s_mark = 0;
+GCNode* GCNode::marked = nullptr;
+GCNode* GCNode::unmarked = nullptr;
 
 #ifdef HAVE_ADDRESS_SANITIZER
 static void* asan_allocate(size_t bytes);
@@ -77,6 +79,7 @@ static const int kRedzoneSize = 0;
 static void* offset(void* p, size_t bytes) {
     return static_cast<char*>(p) + bytes;
 }
+#define LIST
 
 static void* get_object_pointer_from_allocation(void* allocation) {
     return offset(allocation, kRedzoneSize);
@@ -127,9 +130,47 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
 GCNode::GCNode(CreateAMinimallyInitializedGCNode*) : m_rcmms(s_decinc_refcount[1]) {
 }
 
+GCNode::GCNode()
+    : m_rcmms(s_mark | s_moribund_mask)
+{
+#ifdef LIST
+    // Add to marked list.
+    succ = marked;
+    pred = nullptr;
+    if (marked) {
+        marked->pred = this;
+    }
+    marked = this;
+#else
+    succ = pred = nullptr;
+#endif
+
+    ++s_num_nodes;
+    s_moribund->push_back(this);
+}
 void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
+
+#ifdef LIST
+    GCNode* node = static_cast<GCNode*>(p);
+    if (node->pred) {
+        if (node->succ) {
+            node->succ->pred = node->pred;
+        }
+        node->pred->succ = node->succ;
+    } else if (p == unmarked) {
+        if (node->succ) {
+            node->succ->pred = nullptr;
+        }
+        unmarked = node->succ;
+    } else {
+        if (node->succ) {
+            node->succ->pred = nullptr;
+        }
+        marked = node->succ;
+    }
+#endif
 
 #ifdef HAVE_ADDRESS_SANITIZER
     asan_free(p);
@@ -257,13 +298,15 @@ void GCNode::mark()
     // alternation.  This avoids the need for the sweep phase to
     // iterate through the surviving nodes simply to remove marks.
     s_mark ^= s_mark_mask;
+    std::swap(marked, unmarked);
     GCNode::Marker marker;
     GCRootBase::visitRoots(&marker);
     GCStackRootBase::visitRoots(&marker);
     ProtectStack::visitRoots(&marker);
     WeakRef::markThru();
-    if (R_Srcref)
+    if (R_Srcref) {
 	marker(R_Srcref);
+    }
 }
 
 static GCNode* getNodePointerFromAllocation(void* allocation)
@@ -291,6 +334,7 @@ void GCNode::detachReferentsOfObjectIfUnmarked(GCNode* object,
 
 void GCNode::sweep()
 {
+    //printf("\nSWEEP\n");
     // Detach the referents of nodes that haven't been marked.
     // Once this is done, all of the nodes in the cycle will be unreferenced
     // and they will have been deleted unless their reference count is
@@ -324,16 +368,57 @@ static void applyToAllAllocatedNodesInBlock(struct hblk* block, GC_word fn)
 
 void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
 {
+#ifdef LIST
+    GCNode* p = GCNode::unmarked;
+    while (p) {
+        if (p->isMarked()) {
+            error("trying to delete marked node");
+        }
+        f(p);
+        p = p->succ;
+    }
+#else
     GC_apply_to_all_blocks(
 	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
+#endif
 }
 
 
-void GCNode::Marker::operator()(const GCNode* node)
+void GCNode::Marker::operator()(const GCNode* p)
 {
+    GCNode* node = const_cast<GCNode*>(p);
     if (node->isMarked()) {
 	return;
     }
+#ifdef LIST
+    if (node->pred) {
+        if (node->succ) {
+            node->succ->pred = node->pred;
+        }
+        node->pred->succ = node->succ;
+
+        // Add to marked list.
+        node->succ = marked;
+        node->pred = nullptr;
+        if (marked) {
+            marked->pred = node;
+        }
+        marked = node;
+    } else if (node == unmarked) {
+        if (node->succ) {
+            node->succ->pred = nullptr;
+        }
+        unmarked = node->succ;
+
+        // Add to marked list.
+        node->succ = marked;
+        node->pred = nullptr;
+        if (marked) {
+            marked->pred = node;
+        }
+        marked = node;
+    }
+#endif
     // Update mark  Beware ~ promotes to unsigned int.
     node->m_rcmms &= static_cast<unsigned char>(~s_mark_mask);
     node->m_rcmms |= s_mark;

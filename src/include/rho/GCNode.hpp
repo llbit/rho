@@ -124,12 +124,7 @@ namespace rho {
 	    virtual void operator()(const GCNode* node) = 0;
 	};
 
-	GCNode()
-            : m_rcmms(s_mark | s_moribund_mask)
-	{
-	    ++s_num_nodes;
-	    s_moribund->push_back(this);
-	}
+	GCNode();
 
 	/** @brief Allocate memory.
          *
@@ -322,6 +317,11 @@ namespace rho {
 	  // significant bit is set to s_mark on construction; this
 	  // bit is then toggled in the mark phase of a mark-sweep
 	  // garbage collection to identify reachable nodes.
+
+        static GCNode* marked;
+        static GCNode* unmarked;
+        GCNode* pred; // Mark list predecessor.
+        GCNode* succ; // Mark list successor.
 
 	static void gcliteImpl();
 
