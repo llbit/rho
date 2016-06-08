@@ -237,6 +237,11 @@ namespace rho {
 	// Otherwise returns nullptr.
 	static GCNode* asGCNode(void* candidate_pointer);
 
+	static unsigned char s_mark;  // During garbage collection, a
+	  // node is considered marked if its s_mark_mask bit matches the
+	  // corresponding bit of s_mark.  (Only this bit will ever be
+	  // set in s_mark.)
+
     protected:
 	/**
 	 * @note The destructor is protected to ensure that GCNode
@@ -253,6 +258,8 @@ namespace rho {
 	friend class GCStackRootBase;
 	friend class NodeStack;
 	friend class WeakRef;
+
+        void mark_node() const;
 
 	/** Visitor class used to mark nodes.
 	 *
@@ -295,15 +302,12 @@ namespace rho {
 	// reference count.  Patterns 0, 2, 4, ... are used to
 	// decrement; 1, 3, 5, .. to increment.
 	static const unsigned char s_decinc_refcount[];
-	static unsigned char s_mark;  // During garbage collection, a
-	  // node is considered marked if its s_mark_mask bit matches the
-	  // corresponding bit of s_mark.  (Only this bit will ever be
-	  // set in s_mark.)
 
-	static const unsigned char s_mark_mask = 0x80;
+	static const unsigned char s_mark_mask = 0x01;
 	static const unsigned char s_refcount_mask = 0x3e;
-	static const unsigned char s_on_stack_mask = 0x1;
+	static const unsigned char s_on_stack_mask = 0x80;
 
+	unsigned m_node_index;
 	mutable unsigned char m_rcmms;
 	  // Refcount/moribund/marked/on_stack.  The least
 	  // significant bit is set if a pointer to this object is
@@ -316,7 +320,7 @@ namespace rho {
 	  // garbage collection to identify reachable nodes.
 
 	struct CreateAMinimallyInitializedGCNode;
-	GCNode(CreateAMinimallyInitializedGCNode*);
+	GCNode(unsigned node_index);
 	GCNode(const GCNode&) = delete;
 	GCNode& operator=(const GCNode&) = delete;
 
@@ -362,8 +366,6 @@ namespace rho {
 	/** @brief Carry out the sweep phase of garbage collection.
 	 */
 	static void sweep();
-
-	static void applyToAllAllocatedNodes(std::function<void(GCNode*)>);
 
 	friend class GCEdgeBase;
 	friend class GCTestHelper;

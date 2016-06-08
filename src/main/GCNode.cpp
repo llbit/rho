@@ -73,6 +73,143 @@ static const int kRedzoneSize = 16;
 static const int kRedzoneSize = 0;
 #endif  // HAVE_ADDRESS_SANITIZER
 
+typedef std::uint64_t u64;
+
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+
+inline int first_free(u64 bitset) {
+    if (bitset == 0) {
+        return -1;
+    }
+#if defined __GNUC__ || __has_builtin(__builtin_ctzll)
+    return __builtin_ctzll(bitset);
+#else
+    int log2 = 0;
+    if (!(bitset & 0xFFFFFFFF)) {
+        log2 = 32;
+        bitset >>= 32;
+    }
+    if (!(bitset & 0xFFFFull)) {
+        log2 += 16;
+        bitset >>= 16;
+    }
+    if (!(bitset & 0xFFull)) {
+        log2 += 8;
+        bitset >>= 8;
+    }
+    if (!(bitset & 0xFull)) {
+        log2 += 4;
+        bitset >>= 4;
+    }
+    if (!(bitset & 0x3ull)) {
+        log2 += 2;
+        bitset >>= 2;
+    }
+    return log2 + 1 - (bitset & 1ull);
+#endif
+}
+
+// VICTIM_MAX must be power of two.
+#define VICTIM_MAX (2048)
+#define VICTIM_MASK (VICTIM_MAX - 1)
+#define BITSET_ENTRIES (128)
+#define SUPERBLOCK_SIZE (BITSET_ENTRIES * 64)
+
+unsigned num_victim = 0;
+unsigned last_victim = 0;
+unsigned victim[VICTIM_MAX];
+
+struct Superblock {
+    unsigned num_free = SUPERBLOCK_SIZE;
+    volatile u64 free[BITSET_ENTRIES];
+    uintptr_t metadata[SUPERBLOCK_SIZE]; // GCNode pointer with LSB used as mark bit.
+
+    Superblock() {
+        for (int i = 0; i < BITSET_ENTRIES; ++i) {
+            free[i] = ~0ull;
+        }
+    }
+
+    ~Superblock() {
+        error("Should not free superblocks.");
+    }
+};
+
+static unsigned last_superblock = 0;
+
+// Allocated on dynamically to avoid messy cleanup.
+static std::vector<Superblock*>* superblocks;
+
+void GCNode::mark_node() const {
+    Superblock* superblock = (*superblocks)[m_node_index / SUPERBLOCK_SIZE];
+    unsigned index = m_node_index % SUPERBLOCK_SIZE;
+    superblock->metadata[index] = (superblock->metadata[index] & ~((uintptr_t) 1)) | s_mark;
+}
+
+static int next_free(Superblock* superblock) {
+    if (superblock->num_free == 0) {
+        return -1;
+    }
+    for (int i = 0; i < BITSET_ENTRIES; ++i) {
+        int index = first_free(superblock->free[i]);
+        if (index >= 0) {
+            return i * 64 + index;
+        }
+    }
+    error("Num free counter is inconsistent for this superblock.");
+    return -1;
+}
+
+static void alloc_node(Superblock* superblock, GCNode* node, int index) {
+    //assert(superblock->num_free > 0);
+    superblock->free[index / 64] &= ~(1ull << (index & 63));
+    superblock->metadata[index] = (uintptr_t) node | GCNode::s_mark; // Marked by default to avoid collection before the object is traversable from the stack. TODO: is this needed??
+    superblock->num_free -= 1;
+}
+
+static unsigned track_node(GCNode* node) {
+    if (num_victim > 0) {
+        int index = victim[last_victim];
+        last_victim = (last_victim + VICTIM_MASK) & VICTIM_MASK;
+        num_victim -= 1;
+        alloc_node((*superblocks)[index / SUPERBLOCK_SIZE], node, index % SUPERBLOCK_SIZE);
+        return index;
+    }
+    while (last_superblock < superblocks->size()) {
+        int next = next_free((*superblocks)[last_superblock]);
+        if (next >= 0) {
+            alloc_node((*superblocks)[last_superblock], node, next);
+            return last_superblock * SUPERBLOCK_SIZE + next;
+        }
+        last_superblock += 1;
+    }
+    Superblock* superblock = new Superblock();
+    superblocks->push_back(superblock);
+    alloc_node(superblock, node, 0);
+    return last_superblock * SUPERBLOCK_SIZE;
+}
+
+/** @brief Mark the specified node as free. */
+static void untrack_node(unsigned index) {
+    unsigned superblock_id = index / SUPERBLOCK_SIZE;
+    Superblock* superblock = (*superblocks)[superblock_id];
+    unsigned local = index % SUPERBLOCK_SIZE;
+    unsigned bitset = local / 64;
+    superblock->free[bitset] |= 1ull << (local & 63);
+    superblock->num_free += 1;
+    // Add to victim buffer.
+    last_victim = (last_victim + 1) & VICTIM_MASK;
+    if (num_victim < VICTIM_MAX) {
+        num_victim += 1;
+    }
+    victim[last_victim] = index;
+    if (superblock_id < last_superblock) {
+        last_superblock = superblock_id;
+    }
+}
+
 static void* offset(void* p, size_t bytes) {
     return static_cast<char*>(p) + bytes;
 }
@@ -112,6 +249,8 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     set_allocated_bit(result);
 #endif
 
+    unsigned node_index = track_node((GCNode*) result);
+
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
     // minimally initialized.
@@ -119,16 +258,18 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     // it from getting marked as moribund or garbage collected (the mark-sweep
     // GC uses the reference counts, so this is always effective).
     // It will be overwritten by the real constructor.
-    new (result)GCNode(static_cast<CreateAMinimallyInitializedGCNode*>(nullptr));
+    new (result)GCNode(node_index);
     return result;
 }
 
-GCNode::GCNode(CreateAMinimallyInitializedGCNode*) : m_rcmms(s_decinc_refcount[1]) {
+GCNode::GCNode(unsigned node_index) : m_rcmms(s_decinc_refcount[1]), m_node_index(node_index) {
 }
 
 void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
+
+    untrack_node(((GCNode*) p)->m_node_index);
 
 #ifdef HAVE_ADDRESS_SANITIZER
     asan_free(p);
@@ -172,6 +313,11 @@ void GCNode::markSweepGC()
 
 void GCNode::initialize()
 {
+    superblocks = new vector<Superblock*>();
+    for (int i = 0; i < 5; ++i) {
+        superblocks->push_back(new Superblock());
+    }
+
     // Initialize the Boehm GC.
     GC_set_all_interior_pointers(1);
     GC_set_dont_precollect(1);
@@ -215,43 +361,37 @@ void GCNode::sweep()
     // Once this is done, all of the nodes in the cycle will be unreferenced
     // and they will have been deleted unless their reference count is
     // saturated.
-    applyToAllAllocatedNodes([&](GCNode* node) {
-        if (!node->isMarked()) {
-            delete node;
+    vector<GCNode*> unmarked_and_saturated;
+    for (auto superblock : *superblocks) {
+        if (superblock->num_free != SUPERBLOCK_SIZE) {
+            int offset = 0;
+            for (int i = 0; i < BITSET_ENTRIES; ++i) {
+                if (superblock->free[i] != ~0ull) {
+                    for (int bit = 0; bit < 64; ++bit) {
+                        if (!(superblock->free[i] & (1ull << bit))) {
+                            uintptr_t metadata = superblock->metadata[offset + bit];
+                            uintptr_t mark = metadata & 1;
+                            if (mark != s_mark) {
+                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
+                                delete node;
+                            }
+                        }
+                    }
+                }
+                offset += 64;
+            }
         }
-    });
+    }
     // At this point, the only unmarked objects are GCNodes with saturated
     // reference counts.  Delete them.
 }
-
-static void applyToAllAllocatedNodesInBlock(struct hblk* block, GC_word fn)
-{
-    auto function = reinterpret_cast<std::function<void(GCNode*)>*>(fn);
-    hdr* block_header = HDR(block);
-    size_t object_size = block_header->hb_sz;
-    char *start = block->hb_body;
-    char* end = start + HBLKSIZE - object_size + 1;
-    
-    for (char* allocation = start; allocation < end; allocation += object_size)
-    {
-	if (test_allocated_bit(allocation)) {
-	    (*function)(getNodePointerFromAllocation(allocation));
-	}
-    }
-}
-
-void GCNode::applyToAllAllocatedNodes(std::function<void(GCNode*)> f)
-{
-    GC_apply_to_all_blocks(
-	applyToAllAllocatedNodesInBlock, reinterpret_cast<GC_word>(&f));
-}
-
 
 void GCNode::Marker::operator()(const GCNode* node)
 {
     if (node->isMarked()) {
 	return;
     }
+    node->mark_node();
     // Update mark  Beware ~ promotes to unsigned int.
     node->m_rcmms &= static_cast<unsigned char>(~s_mark_mask);
     node->m_rcmms |= s_mark;
