@@ -314,9 +314,7 @@ void GCNode::markSweepGC()
 void GCNode::initialize()
 {
     superblocks = new vector<Superblock*>();
-    for (int i = 0; i < 5; ++i) {
-        superblocks->push_back(new Superblock());
-    }
+    superblocks->push_back(new Superblock());
 
     // Initialize the Boehm GC.
     GC_set_all_interior_pointers(1);
