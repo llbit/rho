@@ -125,10 +125,9 @@ namespace rho {
 	};
 
 	GCNode()
-            : m_rcmms(s_mark | s_moribund_mask)
+            : m_rcmms(s_mark)
 	{
 	    ++s_num_nodes;
-	    s_moribund->push_back(this);
 	}
 
 	/** @brief Allocate memory.
@@ -245,10 +244,7 @@ namespace rho {
 	 * Effective C++' Item 27.) Derived classes should likewise
 	 * declare their destructors private or protected.
 	 */
-	virtual ~GCNode()
-	{
-	    if (m_rcmms & s_moribund_mask)
-		destruct_aux();
+	virtual ~GCNode() {
 	    --s_num_nodes;
 	}
     private:
@@ -288,9 +284,6 @@ namespace rho {
 	    unsigned int m_marks_applied;
 	};
 
-	static std::vector<const GCNode*>* s_moribund;  // Vector of
-	  // pointers to nodes whose reference count has fallen to
-	  // zero (but may subsequently have increased again).
 	static unsigned int s_num_nodes;  // Number of nodes in existence
 
 	// Flag that is set if the on_stack bits are known to be up to date.
@@ -308,7 +301,6 @@ namespace rho {
 	  // set in s_mark.)
 
 	static const unsigned char s_mark_mask = 0x80;
-	static const unsigned char s_moribund_mask = 0x40;
 	static const unsigned char s_refcount_mask = 0x3e;
 	static const unsigned char s_on_stack_mask = 0x1;
 
@@ -323,23 +315,12 @@ namespace rho {
 	  // bit is then toggled in the mark phase of a mark-sweep
 	  // garbage collection to identify reachable nodes.
 
-	static void gcliteImpl();
-
 	struct CreateAMinimallyInitializedGCNode;
 	GCNode(CreateAMinimallyInitializedGCNode*);
 	GCNode(const GCNode&) = delete;
 	GCNode& operator=(const GCNode&) = delete;
 
 	static void markSweepGC();
-
-	/** @brief Lightweight garbage collection.
-	 *
-	 * This function deletes nodes whose reference counts are
-	 * zero: if the deletion of these nodes in turn
-	 * causes the reference counts of other nodes to fall to zero,
-	 * those nodes are also deleted, and so on recursively.
-	 */
-	static void gclite();
 
 	/** @brief Might this object be unreferenced garbage?
 	 *
@@ -354,7 +335,7 @@ namespace rho {
 	// Returns the stored reference count.
 	unsigned char getRefCount() const
 	{
-	    return (m_rcmms & s_refcount_mask) >> 1;
+	    return 0;
 	}
 
 	// Decrement the reference count (subject to the stickiness of
@@ -362,13 +343,6 @@ namespace rho {
 	// zero, mark the node as moribund.
 	static void decRefCount(const GCNode* node)
 	{
-	    if (node) {
-		unsigned char& rcmms = node->m_rcmms;
-		rcmms ^= s_decinc_refcount[rcmms & s_refcount_mask];
-		if ((rcmms &
-		     (s_refcount_mask | s_on_stack_mask| s_moribund_mask)) == 0)
-		    node->makeMoribund();
-	    }
 	}
 
 	void setOnStackBit() const {
@@ -377,12 +351,6 @@ namespace rho {
 
 	void clearOnStackBit() const {
 	    m_rcmms = m_rcmms & static_cast<unsigned char>(~s_on_stack_mask);
-	    if ((m_rcmms & (s_refcount_mask | s_moribund_mask)) == 0) {
-                // Clearing stack bits only happens when removing a stack barrier, so
-                // the object still exists on the stack and we can only add it to the
-                // moribund list here.
-                addToMoribundList();
-            }
 	}
 
 	bool isOnStackBitSet() const {
@@ -403,10 +371,6 @@ namespace rho {
 	// stickiness of the MSB.
 	static void incRefCount(const GCNode* node)
 	{
-	    if (node) {
-		unsigned char& rcmms = node->m_rcmms;
-		rcmms ^= s_decinc_refcount[(rcmms & s_refcount_mask) + 1];
-	    }
 	}
 
 	/** @brief Initialize the entire memory subsystem.
@@ -423,12 +387,6 @@ namespace rho {
 	    return (m_rcmms & s_mark_mask) == s_mark;
 	}
 
-	/** @brief Mark this node as moribund or delete if the stack bit is correct.
-         */
-	void makeMoribund() const HOT_FUNCTION;
-
-	void addToMoribundList() const HOT_FUNCTION;
-
 	/** @brief Carry out the mark phase of garbage collection.
 	 */
 	static void mark();
@@ -436,8 +394,6 @@ namespace rho {
 	/** @brief Carry out the sweep phase of garbage collection.
 	 */
 	static void sweep();
-	static void detachReferentsOfObjectIfUnmarked(GCNode*,
-						      std::vector<GCNode*>*);
 
 	static void applyToAllAllocatedNodes(std::function<void(GCNode*)>);
 

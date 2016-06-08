@@ -50,7 +50,6 @@ extern "C" {
 using namespace std;
 using namespace rho;
 
-vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
 bool GCNode::s_on_stack_bits_correct = false;
 
@@ -142,25 +141,11 @@ void GCNode::operator delete(void* p, size_t bytes)
 bool GCNode::check()
 {
     // Check moribund list:
-    for (const GCNode* node: *s_moribund) {
-	if (!(node->m_rcmms & s_moribund_mask)) {
-	    cerr << "GCNode::check() : "
-		"Node on moribund list without moribund bit set.\n";
-	    abort();
-	}
-    }
-
     return true;
 }
 
 void GCNode::destruct_aux()
 {
-    // Erase this node from the moribund list:
-    typedef std::vector<const GCNode*>::iterator Iter;
-    Iter it = std::find(s_moribund->begin(), s_moribund->end(), this);
-    if (it == s_moribund->end())
-	abort();  // Should never happen!
-    s_moribund->erase(it);
 }
     
 extern RObject* R_Srcref;
@@ -176,8 +161,6 @@ void GCNode::gc(bool markSweep)
 
     if (markSweep) {
 	GCStackRootBase::withAllStackNodesProtected(markSweepGC);
-    } else {
-	GCStackRootBase::withAllStackNodesProtected(gclite);
     }
 
     decRefCount(R_Srcref);
@@ -196,28 +179,8 @@ void GCNode::markSweepGC()
     s_on_stack_bits_correct = false;
 }
 
-void GCNode::gclite()
-{
-    s_on_stack_bits_correct = true;
-
-    while (!s_moribund->empty()) {
-	// Last in, first out, for cache efficiency:
-	const GCNode* node = s_moribund->back();
-	s_moribund->pop_back();
-	// Clear moribund bit.  Beware ~ promotes to unsigned int.
-	node->m_rcmms &= static_cast<unsigned char>(~s_moribund_mask);
-
-	if (node->maybeGarbage())
-	    delete node;
-    }
-
-    s_on_stack_bits_correct = false;
-}
-
 void GCNode::initialize()
 {
-    s_moribund = new vector<const GCNode*>();
-
     // Initialize the Boehm GC.
     GC_set_all_interior_pointers(1);
     GC_set_dont_precollect(1);
@@ -231,22 +194,6 @@ void GCNode::initialize()
     // stack roots and walk the heap in the mark/sweep cleanup, but no actual
     // garbage collection.
     GC_disable();
-}
-
-void GCNode::makeMoribund() const
-{
-    if (s_on_stack_bits_correct) {
-	// In this case, the node can be deleted immediately.
-	delete this;
-    } else {
-        addToMoribundList();
-    }
-}
-
-void GCNode::addToMoribundList() const
-{
-    m_rcmms |= s_moribund_mask;
-    s_moribund->push_back(this);
 }
 
 void GCNode::mark()
@@ -272,38 +219,20 @@ static GCNode* getNodePointerFromAllocation(void* allocation)
 	get_object_pointer_from_allocation(allocation));
 }
 
-void GCNode::detachReferentsOfObjectIfUnmarked(GCNode* object,
-					       vector<GCNode*> *unmarked_and_saturated)
-{
-    if (!object->isMarked()) {
-	int ref_count = object->getRefCount();
-	incRefCount(object);
-	if (object->getRefCount() == ref_count) {
-	    // The reference count has saturated.
-	    object->detachReferents();
-	    unmarked_and_saturated->push_back(object);
-	} else {
-	    object->detachReferents();
-	    decRefCount(object);
-	}
-    }
-}
-
 void GCNode::sweep()
 {
     // Detach the referents of nodes that haven't been marked.
     // Once this is done, all of the nodes in the cycle will be unreferenced
     // and they will have been deleted unless their reference count is
     // saturated.
-    vector<GCNode*> unmarked_and_saturated;
     applyToAllAllocatedNodes([&](GCNode* node) {
-	    detachReferentsOfObjectIfUnmarked(node, &unmarked_and_saturated);
-	});
+        if (!node->isMarked()) {
+            node->detachReferents();
+            delete node;
+        }
+    });
     // At this point, the only unmarked objects are GCNodes with saturated
     // reference counts.  Delete them.
-    for (GCNode* node : unmarked_and_saturated) {
-	delete node;
-    }
 }
 
 static void applyToAllAllocatedNodesInBlock(struct hblk* block, GC_word fn)
