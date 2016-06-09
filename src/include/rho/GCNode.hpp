@@ -238,6 +238,11 @@ namespace rho {
 	// Otherwise returns nullptr.
 	static GCNode* asGCNode(void* candidate_pointer);
 
+	// Returns the stored reference count.
+	unsigned char getRefCount() const
+	{
+	    return (m_rcmms & s_refcount_mask) >> 1;
+	}
     protected:
 	/**
 	 * @note The destructor is protected to ensure that GCNode
@@ -350,11 +355,6 @@ namespace rho {
 	bool maybeGarbage() const
 	{
 	    return (m_rcmms & (s_refcount_mask | s_on_stack_mask)) == 0;
-	}
-	// Returns the stored reference count.
-	unsigned char getRefCount() const
-	{
-	    return (m_rcmms & s_refcount_mask) >> 1;
 	}
 
 	// Decrement the reference count (subject to the stickiness of

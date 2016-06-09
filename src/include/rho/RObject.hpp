@@ -651,7 +651,14 @@ extern "C" {
      * @return Refer to 'R Internals' document.  Returns 0 if \a x is a
      * null pointer.
      */
-    inline int NAMED(SEXP x) {return x ? x->m_named : 0;}
+    inline int NAMED(SEXP x) {
+#ifdef ENABLE_NAMED
+        return x ? x->m_named : 0;
+#else
+        int count = x ? ((rho::GCNode*) x)->getRefCount() : 0;
+        return count > 2 ? 2 : count;
+#endif
+    }
 
     /** @brief Does an object have a class attribute?
      *
@@ -704,8 +711,10 @@ extern "C" {
      */
     inline void SET_NAMED(SEXP x, int v)
     {
+#ifdef ENABLE_NAMED
 	if (!x) return;
 	x->m_named = static_cast<unsigned char>(v);
+#endif
     }
 
     /**
