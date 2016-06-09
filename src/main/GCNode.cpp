@@ -359,7 +359,6 @@ void GCNode::sweep()
     // Once this is done, all of the nodes in the cycle will be unreferenced
     // and they will have been deleted unless their reference count is
     // saturated.
-    vector<GCNode*> unmarked_and_saturated;
     for (auto superblock : *superblocks) {
         if (superblock->num_free != SUPERBLOCK_SIZE) {
             int offset = 0;
@@ -370,8 +369,7 @@ void GCNode::sweep()
                             uintptr_t metadata = superblock->metadata[offset + bit];
                             uintptr_t mark = metadata & 1;
                             if (mark != s_mark) {
-                                GCNode* node = reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
-                                delete node;
+                                delete reinterpret_cast<GCNode*>(metadata & ~((uintptr_t) 1));
                             }
                         }
                     }
@@ -380,8 +378,6 @@ void GCNode::sweep()
             }
         }
     }
-    // At this point, the only unmarked objects are GCNodes with saturated
-    // reference counts.  Delete them.
 }
 
 void GCNode::Marker::operator()(const GCNode* node)
