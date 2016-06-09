@@ -521,7 +521,10 @@ namespace rho {
 	 * @param stype Required type of the RObject.
 	 */
 	explicit RObject(SEXPTYPE stype = CXXSXP)
-	    : m_type(stype & s_sexptype_mask), m_named(0),
+	    : m_type(stype & s_sexptype_mask),
+#ifdef ENABLE_NAMED
+              m_named(0),
+#endif
 	      m_memory_traced(false), m_missing(0), m_argused(0),
 	      m_active_binding(false), m_binding_locked(false)
 	{}
@@ -540,9 +543,11 @@ namespace rho {
 	unsigned char m_type;  // The least-significant six bits hold
 	  // the SEXPTYPE.  Bit 7 is set if the object has a
 	  // class attribute.  Bit 6 is set to denote an S4 object.
+#ifdef ENABLE_NAMED
     public:
 	// To be private in future:
 	unsigned char m_named;
+#endif
     private:
 	// The following field is used in connection with R functions
 	// such as tracemem, and has effect only if rho is built with

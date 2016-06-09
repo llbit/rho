@@ -76,7 +76,10 @@ const unsigned char RObject::s_S4_mask;
 const unsigned char RObject::s_class_mask;
 
 RObject::RObject(const RObject& pattern)
-    : m_type(pattern.m_type), m_named(0),
+    : m_type(pattern.m_type),
+#ifdef ENABLE_NAMED
+      m_named(0),
+#endif
       m_memory_traced(pattern.m_memory_traced), m_missing(pattern.m_missing),
       m_argused(pattern.m_argused), m_active_binding(pattern.m_active_binding),
       m_binding_locked(pattern.m_binding_locked)
@@ -275,7 +278,9 @@ void RObject::Transmute(RObject* source,
 			std::function<RObject*(void*)> constructor)
 {
     // Store RObject properties.
+#ifdef ENABLE_NAMED
     unsigned char named = source->m_named;
+#endif
     bool isS4 = source->isS4Object();
 #ifdef R_MEMORY_PROFILING
     bool memory_traced = source->memoryTraced();
@@ -295,7 +300,9 @@ void RObject::Transmute(RObject* source,
     dest->restoreInternalData(gc_data);
     dest->setAttributes(attributes);
 
+#ifdef ENABLE_NAMED
     dest->m_named = named;
+#endif
     dest->setS4Object(isS4);
 #ifdef R_MEMORY_PROFILING
     dest->setMemoryTracing(memory_traced);
