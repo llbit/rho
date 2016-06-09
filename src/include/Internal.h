@@ -345,6 +345,7 @@ SEXP do_seq_len(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObj
 rho::quick_builtin do_serialize;
 SEXP do_serializeToConn(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* object_, rho::RObject* con_, rho::RObject* ascii_, rho::RObject* version_, rho::RObject* refhook_);
 SEXP do_set(SEXP, SEXP, SEXP, SEXP);  // Special
+SEXP do_set_super(SEXP, SEXP, SEXP, SEXP);  // Special
 SEXP do_setS4Object(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* object_, rho::RObject* flag_, rho::RObject* complete_);
 SEXP do_setFileTime(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* path_, rho::RObject* time_);
 SEXP do_setencoding(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* x_, rho::RObject* value_);
