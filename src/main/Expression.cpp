@@ -429,9 +429,7 @@ SEXP Rf_currentExpression()
 
 SEXP Rf_lcons(SEXP cr, SEXP tl)
 {
-    GCStackRoot<> crr(cr);
-    GCStackRoot<PairList> tlr(SEXP_downcast<PairList*>(tl));
-    return new CachingExpression(crr, tlr);
+    return new CachingExpression(cr, SEXP_downcast<PairList*>(tl));
 }
 
 void Rf_setCurrentExpression(SEXP e)
