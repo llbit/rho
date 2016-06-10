@@ -161,7 +161,7 @@ void RObject::inspect(RObject* node) {
             type_name = "FUNSXP";
             break;
     }
-    printf("@%zx %d %s [NAM(%d)]\n", (uintptr_t) node, type, type_name, node->m_named);
+    printf("@%zx %d %s [REFS(%d) NAM(%d)]\n", (uintptr_t) node, type, type_name, node->getRefCount(), node->m_named);
 }
 
 RObject::RObject(const RObject& pattern)

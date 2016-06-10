@@ -262,6 +262,7 @@ namespace rho {
 	friend class GCStackRootBase;
 	friend class NodeStack;
 	friend class WeakRef;
+        friend class RObject;
 
 	/** Visitor class used to mark nodes.
 	 *
