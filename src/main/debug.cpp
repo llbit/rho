@@ -151,7 +151,6 @@ SEXP attribute_hidden do_tracemem(/*const*/ rho::Expression* call, const rho::Bu
     return mkString(buffer);
 }
 
-
 SEXP attribute_hidden do_untracemem(/*const*/ rho::Expression* call, const rho::BuiltInFunction* op, rho::Environment* rho, rho::RObject* const* args, int num_args, const rho::PairList* tags)
 {
     SEXP object;
@@ -233,12 +232,12 @@ SEXP do_retracemem(SEXP call, SEXP op, SEXP arg, SEXP rho)
 	do_retracemem_formals = allocFormalsList2(install("x"),
 						  R_PreviousSymbol);
 
-    PROTECT(argList =  matchArgs(do_retracemem_formals, args, call));
+    PROTECT(argList =  matchArgs(do_retracemem_formals, arg, call));
     if(CAR(argList) == R_MissingArg) SETCAR(argList, R_NilValue);
     if(CADR(argList) == R_MissingArg) SETCAR(CDR(argList), R_NilValue);
 
-    object = CAR(arglist);
-    previous = CADR(arglist);
+    object = CAR(argList);
+    previous = CADR(argList);
     if(!isNull(previous) && !isString(previous))
 	    errorcall(call, _("invalid '%s' argument"), "previous");
 

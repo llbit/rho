@@ -57,6 +57,8 @@ SEXP attribute_hidden do_inspect(/*const*/ rho::Expression* call, const rho::Bui
 	    pvec = asInteger(args[2]);
 	}
     }
+    rho::RObject* node = (rho::RObject*) obj;
+    rho::RObject::inspect(node);
     inspect_tree(0, args[0], deep, pvec);
     return obj;
 }

@@ -75,6 +75,95 @@ const unsigned char RObject::s_sexptype_mask;
 const unsigned char RObject::s_S4_mask;
 const unsigned char RObject::s_class_mask;
 
+void RObject::inspect(RObject* node) {
+    SEXPTYPE type = TYPEOF(node);
+    char* type_name;
+    switch (type) {
+        case NILSXP:
+            type_name = "NILSXP";
+            break;
+        case SYMSXP:
+            type_name = "SYMSXP";
+            break;
+        case LISTSXP:
+            type_name = "LISTSXP";
+            break;
+        case CLOSXP:
+            type_name = "CLOSXP";
+            break;
+        case ENVSXP:
+            type_name = "ENVSXP";
+            break;
+        case PROMSXP:
+            type_name = "PROMSXP";
+            break;
+        case LANGSXP:
+            type_name = "LANGSXP";
+            break;
+        case SPECIALSXP:
+            type_name = "SPECIALSXP";
+            break;
+        case BUILTINSXP:
+            type_name = "BUILTINSXP";
+            break;
+        case CHARSXP:
+            type_name = "CHARSXP";
+            break;
+        case LGLSXP:
+            type_name = "LGLSXP";
+            break;
+        case INTSXP:
+            type_name = "INTSXP";
+            break;
+        case REALSXP:
+            type_name = "REALSXP";
+            break;
+        case CPLXSXP:
+            type_name = "CPLXSXP";
+            break;
+        case STRSXP:
+            type_name = "STRSXP";
+            break;
+        case DOTSXP:
+            type_name = "DOTSXP";
+            break;
+        case ANYSXP:
+            type_name = "ANYSXP";
+            break;
+        case VECSXP:
+            type_name = "VECSXP";
+            break;
+        case EXPRSXP:
+            type_name = "EXPRSXP";
+            break;
+        case BCODESXP:
+            type_name = "BCODESXP";
+            break;
+        case EXTPTRSXP:
+            type_name = "EXTPTRSXP";
+            break;
+        case WEAKREFSXP:
+            type_name = "WEAKREFSXP";
+            break;
+        case RAWSXP:
+            type_name = "RAWSXP";
+            break;
+        case S4SXP:
+            type_name = "S4SXP";
+            break;
+        case CXXSXP:
+            type_name = "CXXSXP";
+            break;
+        case BAILSXP:
+            type_name = "BAILSXP";
+            break;
+        case FUNSXP:
+            type_name = "FUNSXP";
+            break;
+    }
+    printf("@%zx %d %s [NAM(%d)]\n", (uintptr_t) node, type, type_name, node->m_named);
+}
+
 RObject::RObject(const RObject& pattern)
     : m_type(pattern.m_type),
 #ifdef ENABLE_NAMED

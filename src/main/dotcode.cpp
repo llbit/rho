@@ -909,9 +909,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		memcpy(RAW(ss), RAW(s), n * sizeof(Rbyte));
 		SET_VECTOR_ELT(ans, na, ss);
 		cargs[na] = RHO_NO_CAST(void*) RAW(ss);
-#ifdef R_MEMORY_PROFILING
-		if (RTRACE(s)) memtrace_report(s, ss);
-#endif
 	    } else cargs[na] = RHO_NO_CAST(void *) RAW(s);
 	    break;
 	case LGLSXP:
@@ -934,9 +931,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		    memcpy(INTEGER(ss), INTEGER(s), n * sizeof(int));
 		    SET_VECTOR_ELT(ans, na, ss);
 		    cargs[na] = RHO_NO_CAST(void*) INTEGER(ss);
-#ifdef R_MEMORY_PROFILING
-		    if (RTRACE(s)) memtrace_report(s, ss);
-#endif
 		} else cargs[na] = RHO_NO_CAST(void*) iptr;
 	    }
 	    break;
@@ -952,9 +946,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		    float *sptr = static_cast<float*>( RHO_alloc(n, sizeof(float)));
 		    for (R_xlen_t i = 0 ; i < n ; i++) sptr[i] = float( REAL(s)[i]);
 		    cargs[na] = RHO_NO_CAST(void*) sptr;
-#ifdef R_MEMORY_PROFILING
-		    if (RTRACE(s)) memtrace_report(s, sptr);
-#endif
 		} else if (copy) {
 		    char *ptr = R_alloc(n * sizeof(double) + 2 * NG, 1);
 		    memset(ptr, FILL, n * sizeof(double) + 2 * NG);
@@ -966,9 +957,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		    memcpy(REAL(ss), REAL(s), n * sizeof(double));
 		    SET_VECTOR_ELT(ans, na, ss);
 		    cargs[na] = RHO_NO_CAST(void*) REAL(ss);
-#ifdef R_MEMORY_PROFILING
-		    if (RTRACE(s)) memtrace_report(s, ss);
-#endif
 		} else cargs[na] = RHO_NO_CAST(void*) rptr;
 	    }
 	    break;
@@ -991,9 +979,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		    memcpy(COMPLEX(ss), COMPLEX(s), n * sizeof(Rcomplex));
 		    SET_VECTOR_ELT(ans, na, ss);
 		    cargs[na] = RHO_NO_CAST(void*) COMPLEX(ss);
-#ifdef R_MEMORY_PROFILING
-		    if (RTRACE(s)) memtrace_report(s, ss);
-#endif
 		} else cargs[na] = RHO_NO_CAST(void *) zptr;
 	    }
 	    break;
@@ -1019,9 +1004,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 		}
 		cargs[na] = RHO_NO_CAST(void*) cptr;
 		cargs0[na] = RHO_NO_CAST(void*) cptr0;
-#ifdef R_MEMORY_PROFILING
-		if (RTRACE(s)) memtrace_report(s, cargs[na]);
-#endif
 	    } else {
 		char **cptr = static_cast<char**>( RHO_alloc(n, sizeof(char*)));
 		for (R_xlen_t i = 0 ; i < n ; i++) {
@@ -1038,9 +1020,6 @@ SEXP attribute_hidden do_dotCode(SEXP call, SEXP op, SEXP args, SEXP env)
 			memset(cptr[i], 0, nn);
 		    }
 		    cargs[na] = RHO_NO_CAST(void*) cptr;
-#ifdef R_MEMORY_PROFILING
-		    if (RTRACE(s)) memtrace_report(s, cargs[na]);
-#endif
 		}
 	    }
 	    break;

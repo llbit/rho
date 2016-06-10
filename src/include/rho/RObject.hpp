@@ -516,6 +516,10 @@ namespace rho {
 	}
 
 	void visitReferents(const_visitor* v) const override;
+
+        /** @brief Prints part of the internal representaiton of an object.
+         */
+        static void inspect(RObject* node);
     protected:
 	/**
 	 * @param stype Required type of the RObject.

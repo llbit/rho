@@ -196,10 +196,14 @@ void GCNode::markSweepGC()
     s_on_stack_bits_correct = false;
 }
 
+static size_t max_moribund_size = 0;
 void GCNode::gclite()
 {
     s_on_stack_bits_correct = true;
 
+    if (s_moribund->size() > max_moribund_size) {
+        max_moribund_size = s_moribund->size();
+    }
     while (!s_moribund->empty()) {
 	// Last in, first out, for cache efficiency:
 	const GCNode* node = s_moribund->back();
