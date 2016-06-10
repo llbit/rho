@@ -35,6 +35,7 @@
 #include "R_ext/Boolean.h"
 #include "rho/SEXPTYPE.hpp"
 #include "rho/GCEdge.hpp"
+#include "rho/GCManager.hpp"
 #include "rho/unrho.hpp"
 
 /** @brief Namespace for the rho project.
@@ -661,6 +662,10 @@ extern "C" {
         return x ? x->m_named : 0;
 #else
         int count = x ? ((rho::GCNode*) x)->getRefCount() : 0;
+        if (count > 1) {
+            rho::GCManager::gc(false);
+            count = ((rho::GCNode*) x)->getRefCount();
+        }
         return count > 2 ? 2 : count;
 #endif
     }
