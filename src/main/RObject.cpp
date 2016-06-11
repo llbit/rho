@@ -77,7 +77,7 @@ const unsigned char RObject::s_class_mask;
 
 void RObject::inspect(RObject* node) {
     SEXPTYPE type = TYPEOF(node);
-    char* type_name;
+    const char* type_name;
     switch (type) {
         case NILSXP:
             type_name = "NILSXP";
@@ -161,7 +161,11 @@ void RObject::inspect(RObject* node) {
             type_name = "FUNSXP";
             break;
     }
+#ifdef ENABLE_NAMED
     printf("@%zx %d %s [REFS(%d) NAM(%d)]\n", (uintptr_t) node, type, type_name, node->getRefCount(), node->m_named);
+#else
+    printf("@%zx %d %s [REFS(%d)]\n", (uintptr_t) node, type, type_name, node->getRefCount());
+#endif
 }
 
 RObject::RObject(const RObject& pattern)

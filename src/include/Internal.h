@@ -487,11 +487,15 @@ SEXP do_getNSRegistry(rho::Expression* call, const rho::BuiltInFunction* op);
 SEXP do_importIntoEnv(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* impenv_, rho::RObject* impnames_, rho::RObject* expenv_, rho::RObject* expnames_);
 SEXP do_envprofile(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* env_);
 
+#ifdef R_MEMORY_PROFILING
 SEXP do_tracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::Environment* rho, rho::RObject* const* args, int num_args, const rho::PairList* tags);
 SEXP do_untracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::Environment* rho, rho::RObject* const* args, int num_args, const rho::PairList* tags);
-//SEXP do_tracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* x_);
+#else
 SEXP do_retracemem(SEXP, SEXP, SEXP, SEXP);
-//SEXP do_untracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* x_);
+SEXP do_untracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* x_);
+#endif
+
+SEXP do_tracemem(rho::Expression* call, const rho::BuiltInFunction* op, rho::RObject* x_);
 
 extern "C" {
 #endif  // __cplusplus
