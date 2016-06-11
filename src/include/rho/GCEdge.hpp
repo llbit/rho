@@ -55,7 +55,6 @@ namespace rho {
 	GCEdgeBase(const GCEdgeBase& source)
 	    : m_target(source.m_target)
 	{
-	    GCNode::incRefCount(m_target);
 	}
 	    
 	~GCEdgeBase()
@@ -79,7 +78,6 @@ namespace rho {
          */
 	void retarget(const GCNode* newtarget)
 	{
-	    GCNode::incRefCount(newtarget);
 	    const GCNode* oldtarget = m_target;
 	    m_target = newtarget;
 	    GCNode::decRefCount(oldtarget);
