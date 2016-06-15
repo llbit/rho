@@ -47,6 +47,8 @@
 #include "rho/RAllocStack.hpp"
 #include "rho/WeakRef.hpp"
 
+#include "rho/BlockPool.hpp"
+
 using namespace std;
 using namespace rho;
 
@@ -55,15 +57,9 @@ unsigned int GCNode::s_num_nodes = 0;
 bool GCNode::s_on_stack_bits_correct = false;
 
 static bool iterating = false;
-typedef std::map<void*, void*> allocation_map;
-static allocation_map allocations;
 
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
-
-static void add_to_allocation_map(void* allocation, size_t size);
-static void remove_from_allocation_map(void* allocation);
-static void* lookup_in_allocation_map(void* tentative_pointer);
 
 // Used to update reference count bits of a GCNode. The array element at index
 // n+1 is XORed with the current rcmms bits to compute the updated reference
@@ -83,8 +79,7 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     MemoryBank::notifyAllocation(bytes);
     void *result;
 
-    result = malloc(bytes);
-    add_to_allocation_map(result, bytes);
+    result = BlockPool::pool_alloc(bytes);
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -104,8 +99,7 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
-    remove_from_allocation_map(p);
-    free(p);
+    BlockPool::pool_free(p);
 }
 
 bool GCNode::check()
@@ -186,6 +180,7 @@ void GCNode::gclite()
 
 void GCNode::initialize()
 {
+    BlockPool::initialize();
     s_moribund = new vector<const GCNode*>();
 }
 
@@ -231,12 +226,10 @@ void GCNode::sweep()
     vector<void*> work;
     vector<GCNode*> to_delete;
     iterating = true;
-    for (auto it : allocations) {
-        work.push_back(it.first);
-    }
+    BlockPool::applyToAllBlocks([&](void* p) { work.push_back(p); });
     iterating = false;
     for (void* pointer : work) {
-        if (allocations.find(pointer) != allocations.end()) {
+        if (BlockPool::lookup(pointer)) {
             // The pointer is still allocated, so detach referents.
             GCNode* node = static_cast<GCNode*>(pointer);
             if (!node->isMarked()) {
@@ -300,7 +293,7 @@ GCNode* GCNode::asGCNode(void* candidate_pointer)
 	return nullptr;
     }
 
-    void* base_pointer = lookup_in_allocation_map(candidate_pointer);
+    void* base_pointer = BlockPool::lookup(candidate_pointer);
     return static_cast<GCNode*>(base_pointer);
 }
 
@@ -310,61 +303,4 @@ GCNode::InternalData GCNode::storeInternalData() const {
 
 void GCNode::restoreInternalData(InternalData data) {
     m_rcmms = data;
-}
-
-void add_to_allocation_map(void* allocation, size_t size)
-{
-    if (iterating) {
-        error("allocating node during GC pass");
-    }
-    if (allocation < heap_start) {
-        heap_start = allocation;
-    }
-    void* allocation_end = static_cast<char*>(allocation) + size;
-    if (allocation_end > heap_end) {
-        heap_end = allocation_end;
-    }
-    allocations[allocation] = allocation_end;
-}
-
-void remove_from_allocation_map(void* allocation)
-{
-    if (iterating) {
-        error("freeing node during GC pass");
-    }
-    allocations.erase(allocation);
-}
-
-void* lookup_in_allocation_map(void* tentative_pointer)
-{
-    // Find the largest key less than or equal to tentative_pointer.
-    allocation_map::const_iterator next_allocation = allocations.upper_bound(tentative_pointer);
-    if (next_allocation != allocations.begin()) {
-        allocation_map::const_iterator allocation = std::prev(next_allocation);
-
-        // Check that tentative_pointer is before the end of the allocation.
-        void* allocation_end = allocation->second;
-        if (tentative_pointer < allocation_end) { // Less-than-or-equal handles one-past-end pointers.
-            return allocation->first;
-        }
-    }
-    return nullptr;
-}
-
-// HELPER FUNCTIONS FOR DEBUGGING
-
-allocation_map::iterator help1(void* candidate) {
-    return allocations.upper_bound(candidate);
-}
-
-allocation_map::const_iterator help2(void* tentative_pointer) {
-  // Find the largest key less than or equal to tentative_pointer.
-  allocation_map::const_iterator next_allocation = allocations.upper_bound(tentative_pointer);
-  if (next_allocation != allocations.begin()) {
-    allocation_map::const_iterator allocation = std::prev(next_allocation);
-    fprintf(stderr, "start: %p\n", allocation->first);
-    fprintf(stderr, "end: %p\n", allocation->second);
-    return std::prev(next_allocation);
-  }
-  return allocations.end();
 }
