@@ -50,6 +50,21 @@ extern "C" {
 using namespace std;
 using namespace rho;
 
+static void test_realloc(int size) {
+    void* alloc1 = GC_malloc_atomic(6060);
+    GC_free(alloc1);
+    void* alloc2 = GC_malloc_atomic(6060);
+    GC_free(alloc2);
+    if (alloc1 != alloc2) {
+        printf("Pointer not reused: %d\n", size);
+    }
+}
+
+static void test_alloc() {
+    test_realloc(6060);
+    test_realloc(10000);
+}
+
 vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
 bool GCNode::s_on_stack_bits_correct = false;
@@ -216,6 +231,7 @@ void GCNode::gclite()
 
 void GCNode::initialize()
 {
+    test_alloc();
     s_moribund = new vector<const GCNode*>();
 
     // Initialize the Boehm GC.
