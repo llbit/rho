@@ -58,14 +58,19 @@ bool GCNode::s_on_stack_bits_correct = false;
 
 static bool iterating = false;
 typedef std::map<void*, void*> allocation_map;
-static allocation_map allocations;
 
-void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
-void* heap_end = reinterpret_cast<void*>(0);
+#define ALLOCATION_CHECK
+
+#ifdef ALLOCATION_CHECK
+static allocation_map allocations;
 
 static void add_to_allocation_map(void* allocation, size_t size);
 static void remove_from_allocation_map(void* allocation);
 static void* lookup_in_allocation_map(void* tentative_pointer);
+#endif
+
+void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
+void* heap_end = reinterpret_cast<void*>(0);
 
 // Used to update reference count bits of a GCNode. The array element at index
 // n+1 is XORed with the current rcmms bits to compute the updated reference
@@ -86,7 +91,9 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     void *result;
 
     result = BlockPool::pool_alloc(bytes);
+#ifdef ALLOCATION_CHECK
     add_to_allocation_map(result, bytes);
+#endif
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -106,7 +113,9 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
+#ifdef ALLOCATION_CHECK
     remove_from_allocation_map(p);
+#endif
     BlockPool::pool_free(p);
 }
 
@@ -235,17 +244,21 @@ void GCNode::sweep()
     vector<GCNode*> to_delete;
     iterating = true;
     BlockPool::applyToAllBlocks([&](void* p) {
+#ifdef ALLOCATION_CHECK
             if (!lookup_in_allocation_map(p)) {
                 error("pointer not in alloc map!");
             }
+#endif
             work.push_back(p);
             });
     iterating = false;
     for (void* pointer : work) {
         if (BlockPool::lookup(pointer)) {
+#ifdef ALLOCATION_CHECK
             if (!lookup_in_allocation_map(pointer)) {
                 error("pointer not in alloc map 2!");
             }
+#endif
             // The pointer is still allocated, so detach referents.
             GCNode* node = static_cast<GCNode*>(pointer);
             if (!node->isMarked()) {
@@ -310,9 +323,11 @@ GCNode* GCNode::asGCNode(void* candidate_pointer)
     }
 
     void* base_pointer = BlockPool::lookup(candidate_pointer);
+#ifdef ALLOCATION_CHECK
     if (base_pointer != lookup_in_allocation_map(candidate_pointer)) {
         error("allocation map mismatch");
     }
+#endif
     return static_cast<GCNode*>(base_pointer);
 }
 
@@ -324,6 +339,7 @@ void GCNode::restoreInternalData(InternalData data) {
     m_rcmms = data;
 }
 
+#ifdef ALLOCATION_CHECK
 void add_to_allocation_map(void* allocation, size_t size)
 {
     if (iterating) {
@@ -362,4 +378,4 @@ void* lookup_in_allocation_map(void* tentative_pointer)
     }
     return nullptr;
 }
-
+#endif

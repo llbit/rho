@@ -295,7 +295,7 @@ HashBucket* bucket_from_pointer(void* p)
         bucket = next;
         next = next->next;
     }
-    if (bucket && bucket->start <= pointer && pointer < bucket->end) {
+    if (bucket && pointer >= bucket->start && pointer < bucket->end) {
         return bucket;
     }
     return nullptr;
