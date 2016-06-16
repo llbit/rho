@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <stdio.h>
 
+#define NO_LOG_ALLOCS
+
 #ifdef ALLOCATION_CHECK
 typedef std::map<void*, void*> allocation_map;
 static allocation_map allocations;
