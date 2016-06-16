@@ -18,12 +18,12 @@ static bool iterating = false;
 static void add_to_allocation_map(void* allocation, size_t size);
 static void remove_from_allocation_map(void* allocation);
 static void* lookup_in_allocation_map(void* tentative_pointer);
+#endif
 
-static void allocerr(const char* msg) {
-    fprintf(stderr, "ERROR: Allocation map mismatch!\n");
+static void allocerr(const char* message) {
+    fprintf(stderr, "ERROR: %s\n", message);
     abort();
 }
-#endif
 
 #ifndef __has_builtin
 #define __has_builtin(x) 0
@@ -148,10 +148,7 @@ bool remove_from_list(void* data) {
         }
         p = p->succ;
     }
-#ifndef NO_LOG_ALLOCS
-    fprintf(logfile, "Error: could not find allocation in list.\n");
-    fflush(logfile);
-#endif
+    allocerr("could not find allocation to free");
     return false;
 }
 
@@ -488,7 +485,7 @@ void BlockPool::applyToAllBlocks(std::function<void(void*)> f)
                         if (!(bitset & (1ull << index))) {
 #ifdef ALLOCATION_CHECK
                             if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
-                                allocerr("pointer not in alloc map!");
+                                allocerr("apply to all blocks iterating over non-alloc'd pointer");
                             }
 #endif
                             f(reinterpret_cast<void*>(block));
