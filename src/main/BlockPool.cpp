@@ -2,15 +2,35 @@
 
 #include <algorithm>
 #include <vector>
+#include <map>
 #include <cstdint>
 #include <cstdlib>
 #include <stdio.h>
+
+#ifdef ALLOCATION_CHECK
+typedef std::map<void*, void*> allocation_map;
+static allocation_map allocations;
+
+static bool iterating = false;
+
+static void add_to_allocation_map(void* allocation, size_t size);
+static void remove_from_allocation_map(void* allocation);
+static void* lookup_in_allocation_map(void* tentative_pointer);
+
+static void allocerr(const char* msg) {
+    fprintf(stderr, "ERROR: Allocation map mismatch!\n");
+    abort();
+}
+#endif
 
 #ifndef __has_builtin
 #define __has_builtin(x) 0
 #endif
 
 using namespace std;
+
+void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
+void* heap_end = reinterpret_cast<void*>(0);
 
 struct SLNode {
     SLNode* pred;
@@ -133,6 +153,17 @@ bool remove_from_list(void* data) {
     return false;
 }
 
+static void update_heap_bounds(void* allocation, size_t size)
+{
+    if (allocation < heap_start) {
+        heap_start = allocation;
+    }
+    void* allocation_end = static_cast<char*>(allocation) + size;
+    if (allocation_end > heap_end) {
+        heap_end = allocation_end;
+    }
+}
+
 // Find next power of two < 4096.
 void* BlockPool::pool_alloc(size_t bytes)
 {
@@ -142,6 +173,10 @@ void* BlockPool::pool_alloc(size_t bytes)
 #ifndef NO_LOG_ALLOCS
         fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
 #endif
+#ifdef ALLOCATION_CHECK
+    add_to_allocation_map(result, bytes);
+#endif
+        update_heap_bounds(result, bytes);
         return result;
     }
 
@@ -165,6 +200,10 @@ void* BlockPool::pool_alloc(size_t bytes)
 #ifndef NO_LOG_ALLOCS
     fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
 #endif
+#ifdef ALLOCATION_CHECK
+    add_to_allocation_map(result, 1 << log2);
+#endif
+    update_heap_bounds(result, 1 << log2);
     return result;
 }
 
@@ -179,6 +218,9 @@ void BlockPool::pool_free(void* p)
 {
 #ifndef NO_LOG_ALLOCS
     fprintf(logfile, "free %p\n", p);
+#endif
+#ifdef ALLOCATION_CHECK
+    remove_from_allocation_map(p);
 #endif
     BlockPool* pool = pool_from_pointer(p);
     if (pool) {
@@ -210,7 +252,7 @@ void BlockPool::free(void* pointer)
 {
     size_t block = reinterpret_cast<size_t>(pointer);
     int i = 0;
-    size_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
+    uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     for (auto superblock : m_superblocks) {
         size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
         size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
@@ -256,7 +298,8 @@ uintptr_t hash_ptr(uintptr_t ptr)
  */
 void BlockPool::RegisterSuperblock(int id) {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
-    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(m_superblocks[id]) + block_offset;
+    Superblock* superblock = m_superblocks[id];
+    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
     uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
     uintptr_t hash = hash_ptr(superblock_start);
     uintptr_t hash_end = hash_ptr(superblock_end - 1);
@@ -424,6 +467,9 @@ void BlockPool::apply_to_blocks(std::function<void(void*)> f)
 
 void BlockPool::applyToAllBlocks(std::function<void(void*)> f)
 {
+#ifdef ALLOCATION_CHECK
+    iterating = true;
+#endif
     for (int i = 0; i < NUM_BUCKET; ++i) {
         HashBucket* bucket = buckets[i];
         while (bucket) {
@@ -438,6 +484,11 @@ void BlockPool::applyToAllBlocks(std::function<void(void*)> f)
                 if (bitset != ~0ull) {
                     for (int index = 0; index < 64 && blockid < pool->m_superblock_size; ++index) {
                         if (!(bitset & (1ull << index))) {
+#ifdef ALLOCATION_CHECK
+                            if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
+                                allocerr("pointer not in alloc map!");
+                            }
+#endif
                             f(reinterpret_cast<void*>(block));
                         }
                         block += pool->m_block_size;
@@ -456,33 +507,81 @@ void BlockPool::applyToAllBlocks(std::function<void(void*)> f)
         f(reinterpret_cast<void*>(sl->data));
         sl = sl->succ;
     }
+#ifdef ALLOCATION_CHECK
+    iterating = false;
+#endif
 }
 
 void* BlockPool::lookup(void* candidate)
 {
-    HashBucket* bucket = bucket_from_pointer(candidate);
-    if (bucket) {
-        BlockPool* pool = bucket->pool;
-        Superblock* superblock = pool->m_superblocks[bucket->superblock_index];
+    void* result = nullptr;
+    if (candidate >= heap_start && candidate < heap_end) {
+        HashBucket* bucket = bucket_from_pointer(candidate);
+        if (bucket) {
+            BlockPool* pool = bucket->pool;
+            Superblock* superblock = pool->m_superblocks[bucket->superblock_index];
 
-        uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (pool->m_bitset_entries * 8);
-        unsigned index = (reinterpret_cast<uintptr_t>(candidate) - bucket->start) / pool->m_block_size;
-        unsigned bitset = index / 64;
-        if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
-            return reinterpret_cast<char*>(bucket->start) + index * pool->m_block_size;
-        } else {
-            // The block is not allocated.
-            return nullptr;
-        }
-    } else {
-        SLNode* p = head->succ;
-        while (p != head) {
-            if (p->data <= candidate && (reinterpret_cast<uintptr_t>(p->data) + p->size) > reinterpret_cast<uintptr_t>(candidate)) {
-                return p->data;
+            unsigned index = (reinterpret_cast<uintptr_t>(candidate) - bucket->start) / pool->m_block_size;
+            unsigned bitset = index / 64;
+            if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
+                result = reinterpret_cast<char*>(bucket->start) + index * pool->m_block_size;
+            } else {
+                // The block is not allocated.
+                result = nullptr;
             }
-            p = p->succ;
+        } else {
+            SLNode* p = head->succ;
+            while (p != head) {
+                if (p->data <= candidate && (reinterpret_cast<uintptr_t>(p->data) + p->size) > reinterpret_cast<uintptr_t>(candidate)) {
+                    result = p->data;
+                    break;
+                }
+                p = p->succ;
+            }
+            // Block not found in separate allocation list.
+            //return nullptr;
         }
-        // Block not found in separate allocation list.
-        return nullptr;
     }
+#ifdef ALLOCATION_CHECK
+    if (result != lookup_in_allocation_map(candidate)) {
+        allocerr("allocation map mismatch");
+    }
+#endif
+    return result;
 }
+
+#ifdef ALLOCATION_CHECK
+void add_to_allocation_map(void* allocation, size_t size)
+{
+    if (iterating) {
+        allocerr("allocating node during GC pass");
+    }
+    void* allocation_end = static_cast<char*>(allocation) + size;
+    allocations[allocation] = allocation_end;
+}
+
+void remove_from_allocation_map(void* allocation)
+{
+    if (iterating) {
+        allocerr("freeing node during GC pass");
+    }
+    allocations.erase(allocation);
+}
+
+void* lookup_in_allocation_map(void* tentative_pointer)
+{
+    // Find the largest key less than or equal to tentative_pointer.
+    allocation_map::const_iterator next_allocation = allocations.upper_bound(tentative_pointer);
+    if (next_allocation != allocations.begin()) {
+        allocation_map::const_iterator allocation = std::prev(next_allocation);
+
+        // Check that tentative_pointer is before the end of the allocation.
+        void* allocation_end = allocation->second;
+        if (tentative_pointer < allocation_end) { // Less-than-or-equal handles one-past-end pointers.
+            return allocation->first;
+        }
+    }
+    return nullptr;
+}
+#endif
+

@@ -56,22 +56,6 @@ vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
 bool GCNode::s_on_stack_bits_correct = false;
 
-static bool iterating = false;
-typedef std::map<void*, void*> allocation_map;
-
-#define ALLOCATION_CHECK
-
-#ifdef ALLOCATION_CHECK
-static allocation_map allocations;
-
-static void add_to_allocation_map(void* allocation, size_t size);
-static void remove_from_allocation_map(void* allocation);
-static void* lookup_in_allocation_map(void* tentative_pointer);
-#endif
-
-void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
-void* heap_end = reinterpret_cast<void*>(0);
-
 // Used to update reference count bits of a GCNode. The array element at index
 // n+1 is XORed with the current rcmms bits to compute the updated reference
 // count n+1.  This does not overflow the reference count bits and preserves
@@ -91,9 +75,6 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     void *result;
 
     result = BlockPool::pool_alloc(bytes);
-#ifdef ALLOCATION_CHECK
-    add_to_allocation_map(result, bytes);
-#endif
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -113,9 +94,6 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
-#ifdef ALLOCATION_CHECK
-    remove_from_allocation_map(p);
-#endif
     BlockPool::pool_free(p);
 }
 
@@ -242,23 +220,11 @@ void GCNode::sweep()
     // saturated.
     vector<void*> work;
     vector<GCNode*> to_delete;
-    iterating = true;
     BlockPool::applyToAllBlocks([&](void* p) {
-#ifdef ALLOCATION_CHECK
-            if (!lookup_in_allocation_map(p)) {
-                error("pointer not in alloc map!");
-            }
-#endif
             work.push_back(p);
             });
-    iterating = false;
     for (void* pointer : work) {
         if (BlockPool::lookup(pointer)) {
-#ifdef ALLOCATION_CHECK
-            if (!lookup_in_allocation_map(pointer)) {
-                error("pointer not in alloc map 2!");
-            }
-#endif
             // The pointer is still allocated, so detach referents.
             GCNode* node = static_cast<GCNode*>(pointer);
             if (!node->isMarked()) {
@@ -318,17 +284,7 @@ void rho::initializeMemorySubsystem()
 // Test if the argument is a GCNode pointer.
 GCNode* GCNode::asGCNode(void* candidate_pointer)
 {
-    if (candidate_pointer < heap_start || candidate_pointer > heap_end) {
-	return nullptr;
-    }
-
-    void* base_pointer = BlockPool::lookup(candidate_pointer);
-#ifdef ALLOCATION_CHECK
-    if (base_pointer != lookup_in_allocation_map(candidate_pointer)) {
-        error("allocation map mismatch");
-    }
-#endif
-    return static_cast<GCNode*>(base_pointer);
+    return static_cast<GCNode*>(BlockPool::lookup(candidate_pointer));
 }
 
 GCNode::InternalData GCNode::storeInternalData() const {
@@ -339,43 +295,3 @@ void GCNode::restoreInternalData(InternalData data) {
     m_rcmms = data;
 }
 
-#ifdef ALLOCATION_CHECK
-void add_to_allocation_map(void* allocation, size_t size)
-{
-    if (iterating) {
-        error("allocating node during GC pass");
-    }
-    if (allocation < heap_start) {
-        heap_start = allocation;
-    }
-    void* allocation_end = static_cast<char*>(allocation) + size;
-    if (allocation_end > heap_end) {
-        heap_end = allocation_end;
-    }
-    allocations[allocation] = allocation_end;
-}
-
-void remove_from_allocation_map(void* allocation)
-{
-    if (iterating) {
-        error("freeing node during GC pass");
-    }
-    allocations.erase(allocation);
-}
-
-void* lookup_in_allocation_map(void* tentative_pointer)
-{
-    // Find the largest key less than or equal to tentative_pointer.
-    allocation_map::const_iterator next_allocation = allocations.upper_bound(tentative_pointer);
-    if (next_allocation != allocations.begin()) {
-        allocation_map::const_iterator allocation = std::prev(next_allocation);
-
-        // Check that tentative_pointer is before the end of the allocation.
-        void* allocation_end = allocation->second;
-        if (tentative_pointer < allocation_end) { // Less-than-or-equal handles one-past-end pointers.
-            return allocation->first;
-        }
-    }
-    return nullptr;
-}
-#endif
