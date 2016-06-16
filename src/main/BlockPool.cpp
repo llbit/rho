@@ -103,9 +103,10 @@ void BlockPool::initialize()
     init_hashtable();
 }
 
-void add_to_list(void* data) {
+void add_to_list(void* data, size_t size) {
     SLNode* node = new SLNode();
     node->data = data;
+    node->size = size;
 
     node->succ = head->succ;
     node->succ->pred = node;
@@ -170,7 +171,7 @@ void* BlockPool::pool_alloc(size_t bytes)
 void* BlockPool::separate_alloc(size_t bytes)
 {
     void* ptr = new double[(bytes + 7) / 8];
-    add_to_list(ptr);
+    add_to_list(ptr, bytes);
     return ptr;
 }
 
