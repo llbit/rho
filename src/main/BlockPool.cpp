@@ -148,7 +148,6 @@ bool remove_from_list(void* data) {
         }
         p = p->succ;
     }
-    allocerr("could not find allocation to free");
     return false;
 }
 
@@ -167,13 +166,13 @@ static void update_heap_bounds(void* allocation, size_t size)
 void* BlockPool::pool_alloc(size_t bytes)
 {
     if (bytes > 4096) {
-        // Default to separate allocation once block size is larger than page size.
+        // Default to separate allocation if block size is larger than page size.
         void* result = separate_alloc(bytes);
 #ifndef NO_LOG_ALLOCS
         fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
 #endif
 #ifdef ALLOCATION_CHECK
-    add_to_allocation_map(result, bytes);
+        add_to_allocation_map(result, bytes);
 #endif
         update_heap_bounds(result, bytes);
         return result;
@@ -224,10 +223,10 @@ void BlockPool::pool_free(void* p)
     BlockPool* pool = pool_from_pointer(p);
     if (pool) {
         pool->free(p);
+    } else if (remove_from_list(p)) {
+        delete[] static_cast<double*>(p);
     } else {
-        if (remove_from_list(p)) {
-            delete[] static_cast<double*>(p);
-        }
+        allocerr("could not find allocation to free");
     }
 }
 void* BlockPool::alloc()
@@ -272,6 +271,7 @@ void BlockPool::free(void* pointer)
     fprintf(logfile, "Error: can not free unknown block.\n");
     fflush(logfile);
 #endif
+    allocerr("can not free unknown block");
 }
 
 #define LOW_BITS (14)
