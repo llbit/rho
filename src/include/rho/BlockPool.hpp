@@ -28,11 +28,11 @@ class BlockPool {
     public:
         BlockPool(size_t block_size, size_t superblock_size)
             : m_block_size(block_size),
-            m_superblock_size(superblock_size),
             m_block_start(std::numeric_limits<size_t>::max()),
             m_block_end(0),
             m_next_superblock(-1) {
-                m_bitset_entries = (m_superblock_size + 63) / 64;
+                m_bitset_entries = (superblock_size + 63) / 64;
+                m_superblock_size = m_bitset_entries * 64; // TODO shrink to page size?
         }
 
         ~BlockPool() {

@@ -104,7 +104,6 @@ static SLNode* head;
 
 static std::vector<BlockPool*> pools;
 
-BlockPool* pool_from_pointer(void* p);
 static HashBucket* bucket_from_pointer(void* p);
 void init_hashtable();
 
@@ -121,6 +120,7 @@ void BlockPool::initialize()
     head->pred = head;
     head->succ = head;
     head->data = nullptr;
+    head->size = 0;
 
     init_hashtable();
 }
@@ -168,13 +168,22 @@ void* BlockPool::pool_alloc(size_t bytes)
     if (bytes > 4096) {
         // Default to separate allocation if block size is larger than page size.
         void* result = separate_alloc(bytes);
+        if (!result) {
+            allocerr("returning null from alloc");
+        }
 #ifndef NO_LOG_ALLOCS
         fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
 #endif
 #ifdef ALLOCATION_CHECK
+        if (lookup_in_allocation_map(result)) {
+            allocerr("reusing live allocation");
+        }
         add_to_allocation_map(result, bytes);
 #endif
         update_heap_bounds(result, bytes);
+#ifdef ALLOCATION_CHECK
+        lookup(result); // Check lookup table consistency.
+#endif
         return result;
     }
 
@@ -195,13 +204,22 @@ void* BlockPool::pool_alloc(size_t bytes)
         pools[log2] = pool;
     }
     void* result = pool->alloc();
+    if (!result) {
+        allocerr("returning null from alloc");
+    }
 #ifndef NO_LOG_ALLOCS
     fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
 #endif
 #ifdef ALLOCATION_CHECK
+    if (lookup_in_allocation_map(result)) {
+        allocerr("reusing live allocation");
+    }
     add_to_allocation_map(result, 1 << log2);
 #endif
     update_heap_bounds(result, 1 << log2);
+#ifdef ALLOCATION_CHECK
+    lookup(result); // Check lookup table consistency.
+#endif
     return result;
 }
 
@@ -218,15 +236,18 @@ void BlockPool::pool_free(void* p)
     fprintf(logfile, "free %p\n", p);
 #endif
 #ifdef ALLOCATION_CHECK
+    if (!lookup(p)) {
+        allocerr("can not free unknown/already-freed pointer");
+    }
     remove_from_allocation_map(p);
 #endif
-    BlockPool* pool = pool_from_pointer(p);
-    if (pool) {
-        pool->free(p);
+    HashBucket* bucket = bucket_from_pointer(p);
+    if (bucket) {
+        bucket->pool->free(p);
     } else if (remove_from_list(p)) {
         delete[] static_cast<double*>(p);
     } else {
-        allocerr("could not find allocation to free");
+        allocerr("failed to free pointer - unallocated or double-free error");
     }
 }
 void* BlockPool::alloc()
@@ -343,15 +364,6 @@ HashBucket* bucket_from_pointer(void* p)
     return nullptr;
 }
 
-BlockPool* pool_from_pointer(void* p)
-{
-    HashBucket* bucket = bucket_from_pointer(p);
-    if (bucket) {
-        return bucket->pool;
-    }
-    return nullptr;
-}
-
 BlockPool::Superblock* BlockPool::add_superblock()
 {
     Superblock* superblock = (Superblock*) new char[std::max(sizeof(int), alignof(u64*))
@@ -440,7 +452,7 @@ void* BlockPool::get_block_pointer(void* pointer)
     return nullptr;
 }
 
-void BlockPool::apply_to_blocks(std::function<void(void*)> f)
+void BlockPool::apply_to_blocks(std::function<void(void*)> fun)
 {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     for (auto superblock : m_superblocks) {
@@ -451,7 +463,12 @@ void BlockPool::apply_to_blocks(std::function<void(void*)> f)
             if (bitset != ~0ull) {
                 for (int index = 0; index < 64 && blockid < m_superblock_size; ++index) {
                     if (!(bitset & (1ull << index))) {
-                        f(reinterpret_cast<void*>(block));
+#ifdef ALLOCATION_CHECK
+                        if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
+                            allocerr("apply to all blocks iterating over non-alloc'd pointer");
+                        }
+#endif
+                        fun(reinterpret_cast<void*>(block));
                     }
                     block += m_block_size;
                     blockid += 1;
@@ -464,46 +481,19 @@ void BlockPool::apply_to_blocks(std::function<void(void*)> f)
     }
 }
 
-void BlockPool::applyToAllBlocks(std::function<void(void*)> f)
+void BlockPool::applyToAllBlocks(std::function<void(void*)> fun)
 {
 #ifdef ALLOCATION_CHECK
     iterating = true;
 #endif
-    for (int i = 0; i < NUM_BUCKET; ++i) {
-        HashBucket* bucket = buckets[i];
-        while (bucket) {
-            BlockPool* pool = bucket->pool;
-            uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (pool->m_bitset_entries * 8);
-            unsigned index = bucket->superblock_index;
-            Superblock* superblock = pool->m_superblocks[index];
-            unsigned blockid = 0;
-            uintptr_t block = reinterpret_cast<uintptr_t>(superblock) + block_offset;
-            for (int i = 0; i < pool->m_bitset_entries; ++i) {
-                u64 bitset = superblock->free[i];
-                if (bitset != ~0ull) {
-                    for (int index = 0; index < 64 && blockid < pool->m_superblock_size; ++index) {
-                        if (!(bitset & (1ull << index))) {
-#ifdef ALLOCATION_CHECK
-                            if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
-                                allocerr("apply to all blocks iterating over non-alloc'd pointer");
-                            }
-#endif
-                            f(reinterpret_cast<void*>(block));
-                        }
-                        block += pool->m_block_size;
-                        blockid += 1;
-                    }
-                } else {
-                    block += pool->m_block_size * 64;
-                    blockid += 64;
-                }
-            }
-            bucket = bucket->next;
+    for (BlockPool* pool : pools) {
+        if (pool) {
+            pool->apply_to_blocks(fun);
         }
     }
     SLNode* sl = head->succ;
     while (sl != head) {
-        f(reinterpret_cast<void*>(sl->data));
+        fun(reinterpret_cast<void*>(sl->data));
         sl = sl->succ;
     }
 #ifdef ALLOCATION_CHECK
