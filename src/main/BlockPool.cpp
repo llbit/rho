@@ -59,6 +59,11 @@ struct SparseHashBucket {
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << 9)
 
+// NUM_POOLS is 1 + the 2 log of the max pool allocation size.
+#define NUM_POOLS (13)
+
+static BlockPool* pools[NUM_POOLS];
+
 uintptr_t hash_ptr(uintptr_t ptr)
 {
     return (ptr >> LOW_BITS) & (NUM_BUCKET - 1);
@@ -120,8 +125,6 @@ static int next_log2_16(int size)
 
 static SLNode* free_list;
 
-static std::vector<BlockPool*> pools;
-
 static HashBucket* bucket_from_pointer(void* p);
 
 #ifndef NO_LOG_ALLOCS
@@ -138,6 +141,10 @@ void BlockPool::initialize()
     free_list->succ = free_list;
     free_list->data = nullptr;
     free_list->size = 0;
+
+    for (int i = 0; i < NUM_POOLS; ++i) {
+        pools[i] = nullptr;
+    }
 
     for (int i = 0; i < NUM_BUCKET; ++i) {
         buckets[i] = nullptr;
@@ -224,9 +231,6 @@ void* BlockPool::pool_alloc(size_t bytes)
     }
 
     int log2 = next_log2_16(bytes);
-    if (log2 >= pools.size()) {
-        pools.resize(log2 + 1);
-    }
     BlockPool* pool = pools[log2];
     if (!pool) {
         int block_bytes = 1 << log2;
