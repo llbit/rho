@@ -34,13 +34,6 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
-struct SLNode {
-    SLNode* pred;
-    SLNode* succ;
-    size_t size;
-    void* data;
-};
-
 struct HashBucket {
     HashBucket* next;
     BlockPool* pool;
@@ -71,6 +64,7 @@ uintptr_t hash_ptr(uintptr_t ptr)
 
 HashBucket* buckets[NUM_BUCKET];
 SparseHashBucket* sparse_buckets[NUM_BUCKET];
+SparseHashBucket* free_set[NUM_BUCKET];
 
 inline int first_free(u64 bitset)
 {
@@ -123,8 +117,6 @@ static int next_log2_16(int size)
     return log2;
 }
 
-static SLNode* free_list;
-
 static HashBucket* bucket_from_pointer(void* p);
 
 #ifndef NO_LOG_ALLOCS
@@ -136,11 +128,6 @@ void BlockPool::initialize()
 #ifndef NO_LOG_ALLOCS
     logfile = fopen("/usr/local/google/home/joqvist/foo.log", "w");
 #endif
-    free_list = new SLNode();
-    free_list->pred = free_list;
-    free_list->succ = free_list;
-    free_list->data = nullptr;
-    free_list->size = 0;
 
     for (int i = 0; i < NUM_POOLS; ++i) {
         pools[i] = nullptr;
@@ -149,6 +136,7 @@ void BlockPool::initialize()
     for (int i = 0; i < NUM_BUCKET; ++i) {
         buckets[i] = nullptr;
         sparse_buckets[i] = nullptr;
+        free_set[i] = nullptr;
     }
 }
 
@@ -173,6 +161,8 @@ void add_sparse_block(void* data, size_t size) {
     }
 }
 
+void add_free_block(void* data, size_t size);
+
 bool remove_sparse_block(void* data) {
     uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
     uintptr_t hash = hash_ptr(pointer);
@@ -188,10 +178,53 @@ bool remove_sparse_block(void* data) {
         } else {
             sparse_buckets[hash] = bucket->next;
         }
+        add_free_block(data, bucket->size);
         delete bucket;
         return true;
     }
     return false;
+}
+
+void add_free_block(void* data, size_t size) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
+    uintptr_t hash = size & (NUM_BUCKET - 1);
+
+    SparseHashBucket* bucket = free_set[hash];
+    SparseHashBucket* pred = nullptr;
+    while (bucket && size > bucket->size) {
+        pred = bucket;
+        bucket = bucket->next;
+    }
+    SparseHashBucket* new_bucket = new SparseHashBucket();
+    new_bucket->data = data;
+    new_bucket->size = size;
+    new_bucket->next = bucket;
+    if (pred) {
+        pred->next = new_bucket;
+    } else {
+        free_set[hash] = new_bucket;
+    }
+}
+
+void* remove_free_block(size_t size) {
+    uintptr_t hash = size & (NUM_BUCKET - 1);
+    SparseHashBucket* bucket = free_set[hash];
+    SparseHashBucket* pred = nullptr;
+    while (bucket && size > bucket->size) {
+        pred = bucket;
+        bucket = bucket->next;
+    }
+    if (bucket && size == bucket->size) {
+        if (pred) {
+            pred->next = bucket->next;
+        } else {
+            free_set[hash] = bucket->next;
+        }
+        void* result = bucket->data;
+        delete bucket;
+        return result;
+    }
+    return nullptr;
 }
 
 static void update_heap_bounds(void* allocation, size_t size)
@@ -236,7 +269,7 @@ void* BlockPool::pool_alloc(size_t bytes)
         int block_bytes = 1 << log2;
         size_t superblock_size;
         if (block_bytes < 4096) {
-            superblock_size = 4096 / block_bytes;
+            superblock_size = (4 * 4096) / block_bytes;
         } else {
             superblock_size = 10;
         }
@@ -265,7 +298,10 @@ void* BlockPool::pool_alloc(size_t bytes)
 
 void* BlockPool::separate_alloc(size_t bytes)
 {
-    void* ptr = new double[(bytes + 7) / 8];
+    void* ptr = remove_free_block(bytes);
+    if (!ptr) {
+        ptr = new double[(bytes + 7) / 8];
+    }
     add_sparse_block(ptr, bytes);
     return ptr;
 }
@@ -283,9 +319,9 @@ void BlockPool::pool_free(void* p)
 #endif
     HashBucket* bucket = bucket_from_pointer(p);
     if (bucket) {
-        bucket->pool->free(p);
+        bucket->pool->free(p, bucket->superblock_index);
     } else if (remove_sparse_block(p)) {
-        delete[] static_cast<double*>(p);
+        // delete[] static_cast<double*>(p); // TODO: cleanup.
     } else {
         allocerr("failed to free pointer - unallocated or double-free error");
     }
@@ -307,32 +343,21 @@ void* BlockPool::alloc()
     return block;
 }
 
-void BlockPool::free(void* pointer)
+// Free a pointer inside a given superblock. The block MUST be in the given superblock.
+void BlockPool::free(void* pointer, unsigned superblock_id)
 {
     size_t block = reinterpret_cast<size_t>(pointer);
-    int i = 0;
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
-    for (auto superblock : m_superblocks) {
-        size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
-        size_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-        if (block >= superblock_start && block < superblock_end) {
-            size_t index = (block - superblock_start) / m_block_size;
-            size_t bitset = index / 64;
-            superblock->num_free += 1;
-            superblock->free[bitset] |= 1ull << (index & 63);
-            if (i < m_next_superblock) {
-                m_next_superblock = i;
-            }
-            // TODO add to victim buffer.
-            return;
-        }
-        i += 1;
+    Superblock* superblock = m_superblocks[superblock_id];
+    size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
+    size_t index = (block - superblock_start) / m_block_size;
+    size_t bitset = index / 64;
+    superblock->num_free += 1;
+    superblock->free[bitset] |= 1ull << (index & 63);
+    if (superblock_id < m_next_superblock) {
+        m_next_superblock = superblock_id;
     }
-#ifndef NO_LOG_ALLOCS
-    fprintf(logfile, "Error: can not free unknown block.\n");
-    fflush(logfile);
-#endif
-    allocerr("can not free unknown block");
+    // TODO add to victim buffer.
 }
 
 /**
@@ -397,12 +422,6 @@ BlockPool::Superblock* BlockPool::add_superblock()
     uintptr_t superblock_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + superblock_offset;
     uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-    if (superblock_start < m_block_start) {
-        m_block_start = superblock_start;
-    }
-    if (superblock_end > m_block_end) {
-        m_block_end = superblock_end;
-    }
     m_superblocks.push_back(superblock);
     registerSuperblock(m_superblocks.size() - 1);
     return superblock;
@@ -450,40 +469,15 @@ void* BlockPool::get_next_block(Superblock* superblock)
     return nullptr;
 }
 
-void* BlockPool::get_block_pointer(void* pointer)
-{
-    uintptr_t block = reinterpret_cast<uintptr_t>(pointer);
-    if (block < m_block_start || block >= m_block_end) {
-        return nullptr;
-    }
-    uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
-    for (auto superblock : m_superblocks) {
-        uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
-        uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-        if (block >= superblock_start && block < superblock_end) {
-            unsigned index = (block - superblock_start) / m_block_size;
-            unsigned bitset = index / 64;
-            if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
-                return reinterpret_cast<char*>(superblock_start) + index * m_block_size;
-            } else {
-                // The block is not allocated.
-                return nullptr;
-            }
-        }
-    }
-    return nullptr;
-}
-
 void BlockPool::apply_to_blocks(std::function<void(void*)> fun)
 {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     for (auto superblock : m_superblocks) {
-        unsigned blockid = 0;
         uintptr_t block = reinterpret_cast<uintptr_t>(superblock) + block_offset;
         for (int i = 0; i < m_bitset_entries; ++i) {
             u64 bitset = superblock->free[i];
             if (bitset != ~0ull) {
-                for (int index = 0; index < 64 && blockid < m_superblock_size; ++index) {
+                for (int index = 0; index < 64; ++index) {
                     if (!(bitset & (1ull << index))) {
 #ifdef ALLOCATION_CHECK
                         if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
@@ -493,11 +487,9 @@ void BlockPool::apply_to_blocks(std::function<void(void*)> fun)
                         fun(reinterpret_cast<void*>(block));
                     }
                     block += m_block_size;
-                    blockid += 1;
                 }
             } else {
                 block += m_block_size * 64;
-                blockid += 64;
             }
         }
     }
