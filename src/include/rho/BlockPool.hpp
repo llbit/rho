@@ -24,7 +24,7 @@ class BlockPool {
         void update_next_superblock();
         Superblock* add_superblock();
         void allocate_block(Superblock* superblock, int block);
-        void RegisterSuperblock(int id);
+        void registerSuperblock(int id);
     public:
         BlockPool(size_t block_size, size_t superblock_size)
             : m_block_size(block_size),

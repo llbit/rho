@@ -49,6 +49,24 @@ struct HashBucket {
     unsigned superblock_index;
 };
 
+struct SparseHashBucket {
+    SparseHashBucket* next;
+    void* data;
+    size_t size;
+};
+
+#define LOW_BITS (14)
+#define BUCKET_BITS (9)
+#define NUM_BUCKET (1 << 9)
+
+uintptr_t hash_ptr(uintptr_t ptr)
+{
+    return (ptr >> LOW_BITS) & (NUM_BUCKET - 1);
+}
+
+HashBucket* buckets[NUM_BUCKET];
+SparseHashBucket* sparse_buckets[NUM_BUCKET];
+
 inline int first_free(u64 bitset)
 {
     if (bitset == 0) {
@@ -100,12 +118,11 @@ static int next_log2_16(int size)
     return log2;
 }
 
-static SLNode* head;
+static SLNode* free_list;
 
 static std::vector<BlockPool*> pools;
 
 static HashBucket* bucket_from_pointer(void* p);
-void init_hashtable();
 
 #ifndef NO_LOG_ALLOCS
 FILE* logfile;
@@ -116,37 +133,56 @@ void BlockPool::initialize()
 #ifndef NO_LOG_ALLOCS
     logfile = fopen("/usr/local/google/home/joqvist/foo.log", "w");
 #endif
-    head = new SLNode();
-    head->pred = head;
-    head->succ = head;
-    head->data = nullptr;
-    head->size = 0;
+    free_list = new SLNode();
+    free_list->pred = free_list;
+    free_list->succ = free_list;
+    free_list->data = nullptr;
+    free_list->size = 0;
 
-    init_hashtable();
+    for (int i = 0; i < NUM_BUCKET; ++i) {
+        buckets[i] = nullptr;
+        sparse_buckets[i] = nullptr;
+    }
 }
 
-void add_to_list(void* data, size_t size) {
-    SLNode* node = new SLNode();
-    node->data = data;
-    node->size = size;
+void add_sparse_block(void* data, size_t size) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
+    uintptr_t hash = hash_ptr(pointer);
 
-    node->succ = head->succ;
-    node->succ->pred = node;
-
-    head->succ = node;
-    node->pred = head;
+    SparseHashBucket* bucket = sparse_buckets[hash];
+    SparseHashBucket* pred = nullptr;
+    while (bucket && data > bucket->data) {
+        pred = bucket;
+        bucket = bucket->next;
+    }
+    SparseHashBucket* new_bucket = new SparseHashBucket();
+    new_bucket->data = data;
+    new_bucket->size = size;
+    new_bucket->next = bucket;
+    if (pred) {
+        pred->next = new_bucket;
+    } else {
+        sparse_buckets[hash] = new_bucket;
+    }
 }
 
-bool remove_from_list(void* data) {
-    SLNode* p = head->succ;
-    while (p != head) {
-        if (p->data == data) {
-            p->succ->pred = p->pred;
-            p->pred->succ = p->succ;
-            delete p;
-            return true;
+bool remove_sparse_block(void* data) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
+    uintptr_t hash = hash_ptr(pointer);
+    SparseHashBucket* bucket = sparse_buckets[hash];
+    SparseHashBucket* pred = nullptr;
+    while (bucket && data > bucket->data) {
+        pred = bucket;
+        bucket = bucket->next;
+    }
+    if (bucket && data == bucket->data) {
+        if (pred) {
+            pred->next = bucket->next;
+        } else {
+            sparse_buckets[hash] = bucket->next;
         }
-        p = p->succ;
+        delete bucket;
+        return true;
     }
     return false;
 }
@@ -226,7 +262,7 @@ void* BlockPool::pool_alloc(size_t bytes)
 void* BlockPool::separate_alloc(size_t bytes)
 {
     void* ptr = new double[(bytes + 7) / 8];
-    add_to_list(ptr, bytes);
+    add_sparse_block(ptr, bytes);
     return ptr;
 }
 
@@ -244,7 +280,7 @@ void BlockPool::pool_free(void* p)
     HashBucket* bucket = bucket_from_pointer(p);
     if (bucket) {
         bucket->pool->free(p);
-    } else if (remove_from_list(p)) {
+    } else if (remove_sparse_block(p)) {
         delete[] static_cast<double*>(p);
     } else {
         allocerr("failed to free pointer - unallocated or double-free error");
@@ -295,28 +331,10 @@ void BlockPool::free(void* pointer)
     allocerr("can not free unknown block");
 }
 
-#define LOW_BITS (14)
-#define BUCKET_BITS (9)
-#define NUM_BUCKET (1 << 9)
-
-HashBucket* buckets[NUM_BUCKET];
-
-void init_hashtable()
-{
-    for (int i = 0; i < NUM_BUCKET; ++i) {
-        buckets[i] = nullptr;
-    }
-}
-
-uintptr_t hash_ptr(uintptr_t ptr)
-{
-    return (ptr >> LOW_BITS) & (NUM_BUCKET - 1);
-}
-
 /**
  * Inserts new superblock in hash table.
  */
-void BlockPool::RegisterSuperblock(int id) {
+void BlockPool::registerSuperblock(int id) {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     Superblock* superblock = m_superblocks[id];
     uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
@@ -382,7 +400,7 @@ BlockPool::Superblock* BlockPool::add_superblock()
         m_block_end = superblock_end;
     }
     m_superblocks.push_back(superblock);
-    RegisterSuperblock(m_superblocks.size() - 1);
+    registerSuperblock(m_superblocks.size() - 1);
     return superblock;
 }
 
@@ -491,10 +509,12 @@ void BlockPool::applyToAllBlocks(std::function<void(void*)> fun)
             pool->apply_to_blocks(fun);
         }
     }
-    SLNode* sl = head->succ;
-    while (sl != head) {
-        fun(reinterpret_cast<void*>(sl->data));
-        sl = sl->succ;
+    for (int i = 0; i < NUM_BUCKET; ++i) {
+        SparseHashBucket* bucket = sparse_buckets[i];
+        while (bucket) {
+            fun(bucket->data);
+            bucket = bucket->next;
+        }
     }
 #ifdef ALLOCATION_CHECK
     iterating = false;
@@ -519,13 +539,15 @@ void* BlockPool::lookup(void* candidate)
                 result = nullptr;
             }
         } else {
-            SLNode* p = head->succ;
-            while (p != head) {
-                if (p->data <= candidate && (reinterpret_cast<uintptr_t>(p->data) + p->size) > reinterpret_cast<uintptr_t>(candidate)) {
-                    result = p->data;
-                    break;
-                }
-                p = p->succ;
+            uintptr_t hash = hash_ptr(reinterpret_cast<uintptr_t>(candidate));
+            SparseHashBucket* bucket = sparse_buckets[hash];
+            SparseHashBucket* next = bucket;
+            while (next && candidate >= next->data) {
+                bucket = next;
+                next = next->next;
+            }
+            if (bucket && bucket->data <= candidate && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > reinterpret_cast<uintptr_t>(candidate)) {
+                result = bucket->data;
             }
             // Block not found in separate allocation list.
             //return nullptr;
