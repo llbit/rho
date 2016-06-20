@@ -140,19 +140,16 @@ void BlockPool::initialize()
     }
 }
 
-void add_sparse_block(void* data, size_t size) {
-    uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
+void add_sparse_block(SparseHashBucket* new_bucket) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(new_bucket->data);
     uintptr_t hash = hash_ptr(pointer);
 
     SparseHashBucket* bucket = sparse_buckets[hash];
     SparseHashBucket* pred = nullptr;
-    while (bucket && data > bucket->data) {
+    while (bucket && new_bucket->data > bucket->data) {
         pred = bucket;
         bucket = bucket->next;
     }
-    SparseHashBucket* new_bucket = new SparseHashBucket();
-    new_bucket->data = data;
-    new_bucket->size = size;
     new_bucket->next = bucket;
     if (pred) {
         pred->next = new_bucket;
@@ -161,7 +158,7 @@ void add_sparse_block(void* data, size_t size) {
     }
 }
 
-void add_free_block(void* data, size_t size);
+void add_free_block(SparseHashBucket* new_bucket);
 
 bool remove_sparse_block(void* data) {
     uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
@@ -178,26 +175,21 @@ bool remove_sparse_block(void* data) {
         } else {
             sparse_buckets[hash] = bucket->next;
         }
-        add_free_block(data, bucket->size);
-        delete bucket;
+        add_free_block(bucket);
         return true;
     }
     return false;
 }
 
-void add_free_block(void* data, size_t size) {
-    uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
-    uintptr_t hash = size & (NUM_BUCKET - 1);
+void add_free_block(SparseHashBucket* new_bucket) {
+    uintptr_t hash = new_bucket->size & (NUM_BUCKET - 1);
 
     SparseHashBucket* bucket = free_set[hash];
     SparseHashBucket* pred = nullptr;
-    while (bucket && size > bucket->size) {
+    while (bucket && new_bucket->size > bucket->size) {
         pred = bucket;
         bucket = bucket->next;
     }
-    SparseHashBucket* new_bucket = new SparseHashBucket();
-    new_bucket->data = data;
-    new_bucket->size = size;
     new_bucket->next = bucket;
     if (pred) {
         pred->next = new_bucket;
@@ -206,7 +198,7 @@ void add_free_block(void* data, size_t size) {
     }
 }
 
-void* remove_free_block(size_t size) {
+SparseHashBucket* remove_free_block(size_t size) {
     uintptr_t hash = size & (NUM_BUCKET - 1);
     SparseHashBucket* bucket = free_set[hash];
     SparseHashBucket* pred = nullptr;
@@ -220,9 +212,7 @@ void* remove_free_block(size_t size) {
         } else {
             free_set[hash] = bucket->next;
         }
-        void* result = bucket->data;
-        delete bucket;
-        return result;
+        return bucket;
     }
     return nullptr;
 }
@@ -298,12 +288,16 @@ void* BlockPool::pool_alloc(size_t bytes)
 
 void* BlockPool::separate_alloc(size_t bytes)
 {
-    void* ptr = remove_free_block(bytes);
-    if (!ptr) {
-        ptr = new double[(bytes + 7) / 8];
+    SparseHashBucket* bucket = remove_free_block(bytes);
+    if (bucket) {
+        add_sparse_block(bucket);
+    } else {
+        bucket = new SparseHashBucket();
+        bucket->data = new double[(bytes + 7) / 8];
+        bucket->size = bytes;
+        add_sparse_block(bucket);
     }
-    add_sparse_block(ptr, bytes);
-    return ptr;
+    return bucket->data;
 }
 
 void BlockPool::pool_free(void* p)
