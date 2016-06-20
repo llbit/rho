@@ -53,10 +53,10 @@ struct SparseHashBucket {
 #define NUM_BUCKET (1 << 9)
 
 #define SUPERBLOCK_BITS (10)
-#define SUPERBLOCK_MASK ((1 << 10) - 1)
+#define SUPERBLOCK_MASK ((1 << SUPERBLOCK_BITS) - 1)
 
-// NUM_POOLS is 1 + the 2 log of the max pool allocation size.
-#define NUM_POOLS (13)
+// NUM_POOLS = (1 + max block size) / 8.
+#define NUM_POOLS (513)
 
 static BlockPool* pools[NUM_POOLS];
 
@@ -189,7 +189,7 @@ void add_free_block(SparseHashBucket* new_bucket) {
 
     SparseHashBucket* bucket = free_set[hash];
     SparseHashBucket* pred = nullptr;
-    while (bucket && new_bucket->size > bucket->size) {
+    while (bucket && new_bucket->size >= bucket->size) {
         pred = bucket;
         bucket = bucket->next;
     }
@@ -256,10 +256,10 @@ void* BlockPool::pool_alloc(size_t bytes)
         return result;
     }
 
-    int log2 = next_log2_16(bytes);
-    BlockPool* pool = pools[log2];
+    int pool_index = bytes / 8;
+    int block_bytes = (pool_index + 1) * 8;
+    BlockPool* pool = pools[pool_index];
     if (!pool) {
-        int block_bytes = 1 << log2;
         size_t superblock_size;
         if (block_bytes < 4096) {
             superblock_size = (4 * 4096) / block_bytes;
@@ -267,7 +267,7 @@ void* BlockPool::pool_alloc(size_t bytes)
             superblock_size = 10;
         }
         pool = new BlockPool(block_bytes, superblock_size);
-        pools[log2] = pool;
+        pools[pool_index] = pool;
     }
     void* result = pool->alloc();
     if (!result) {
@@ -280,9 +280,9 @@ void* BlockPool::pool_alloc(size_t bytes)
     if (lookup_in_allocation_map(result)) {
         allocerr("reusing live allocation");
     }
-    add_to_allocation_map(result, 1 << log2);
+    add_to_allocation_map(result, block_bytes);
 #endif
-    update_heap_bounds(result, 1 << log2);
+    update_heap_bounds(result, block_bytes);
 #ifdef ALLOCATION_CHECK
     lookup(result); // Check lookup table consistency.
 #endif
