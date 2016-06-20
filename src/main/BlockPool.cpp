@@ -52,6 +52,9 @@ struct SparseHashBucket {
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << 9)
 
+#define SUPERBLOCK_BITS (10)
+#define SUPERBLOCK_MASK ((1 << 10) - 1)
+
 // NUM_POOLS is 1 + the 2 log of the max pool allocation size.
 #define NUM_POOLS (13)
 
@@ -324,7 +327,31 @@ void* BlockPool::alloc()
 {
     Superblock* superblock;
     void* block;
-    if (m_next_superblock >= 0) {
+    if (m_num_victims > 0) {
+        unsigned block = m_victim[m_last_victim];
+        m_num_victims -= 1;
+        m_last_victim = (m_last_victim + 63) & 63;
+        unsigned index = block >> SUPERBLOCK_BITS;
+        unsigned bitset = index / 64;
+        superblock = m_superblocks[block & SUPERBLOCK_MASK];
+        superblock->num_free -= 1;
+        superblock->free[bitset] &= ~(1ull << (index & 63));
+        // Update next superblock.
+        while (m_next_superblock >= 0) {
+            if (m_superblocks[m_next_superblock]->num_free > 0) {
+                break;
+            } else {
+                m_next_superblock += 1;
+                if (m_next_superblock == m_superblocks.size()) {
+                    m_next_superblock = -1;
+                    break;
+                }
+            }
+        }
+        return reinterpret_cast<char*>(superblock)
+            + std::max(sizeof(int), alignof(u64*))
+            + (m_bitset_entries * 8) + index * m_block_size;
+    } else if (m_next_superblock >= 0) {
         superblock = m_superblocks[m_next_superblock];
         block = get_next_block(superblock);
         update_next_superblock();
@@ -351,7 +378,14 @@ void BlockPool::free(void* pointer, unsigned superblock_id)
     if (superblock_id < m_next_superblock) {
         m_next_superblock = superblock_id;
     }
-    // TODO add to victim buffer.
+    // Add to victim buffer only if superblock id fits in the superblock bits.
+    if (superblock_id <= SUPERBLOCK_MASK) {
+        m_last_victim = (m_last_victim + 1) & 63;
+        m_victim[m_last_victim] = (index << SUPERBLOCK_BITS) | superblock_id;
+        if (m_num_victims < 64) {
+            m_num_victims += 1;
+        }
+    }
 }
 
 /**
