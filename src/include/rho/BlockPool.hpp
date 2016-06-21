@@ -35,19 +35,24 @@ class BlockPool {
         static void* Lookup(void* candidate);
 
     private:
+        /**
+         * Used as an arena for allocating blocks. The Superblock members are
+         * only the header part of the structure, the rest is block-size dependent.
+         */
         struct Superblock {
             unsigned num_free;
             u64 free[]; // Free bitset.
         };
         size_t m_block_size; // Number of bytes per block.
-        size_t m_superblock_size; // Number of blocks in the superblock.
-        size_t m_bitset_entries; // Number of entries in the free bitset.
+        size_t m_superblock_size; // Number of blocks in each superblock.
+        size_t m_bitset_entries; // Number of entries in free bitsets.
 
-        unsigned m_num_victims;
-        unsigned m_last_victim;
-        unsigned m_victim[64];
+        unsigned m_num_victims; // Current number of blocks in the victim buffer.
+        unsigned m_last_victim; // Index to latest victim in victim buffer.
+        unsigned m_victim[64]; // Fixed size FIFO victim buffer.
+        // TODO: adjust victim buffer size based on profile/benchmark results.
 
-        int m_next_superblock;
+        int m_next_superblock; // Index to next superblock with a free block.
         vector<Superblock*> m_superblocks;
 
         /** Allocate a block from this block pool. */

@@ -31,9 +31,11 @@ static void allocerr(const char* message) {
 
 using namespace std;
 
+// Tracks heap bounds for fast pointer rejection during lookup.
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
+// Hash bucket for the dense block table.
 struct HashBucket {
     HashBucket* next;
     BlockPool* pool;
@@ -42,6 +44,7 @@ struct HashBucket {
     unsigned superblock_index;
 };
 
+// Hash bucket for the sparse block table and free lists.
 struct SparseHashBucket {
     SparseHashBucket* next;
     void* data;
@@ -89,35 +92,6 @@ inline int first_free(u64 bitset)
     }
     return log2;
 #endif
-}
-
-/** Compute next 2-log. */
-static int next_log2_16(int size)
-{
-    if (size == 0) {
-        return 0;
-    }
-    int log2 = 0;
-    int temp = size;
-    if (temp & 0xFF00) {
-        log2 += 8;
-        temp >>= 8;
-    }
-    if (temp & 0xF0) {
-        log2 += 4;
-        temp >>= 4;
-    }
-    if (temp & 0xC) {
-        log2 += 2;
-        temp >>= 2;
-    }
-    if (temp > 0) {
-        log2 += temp - 1;
-    }
-    if ((size & (1 << log2)) && (size & ((1 << log2) - 1))) {
-        log2 += 1;
-    }
-    return log2;
 }
 
 static HashBucket* bucket_from_pointer(void* p);
