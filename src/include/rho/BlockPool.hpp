@@ -23,17 +23,16 @@ class BlockPool {
             }
         }
 
-        static void initialize();
+        static void Initialize();
 
-        static void* pool_alloc(size_t bytes);
-        static void* separate_alloc(size_t bytes);
-        static void pool_free(void* p);
-        static void applyToAllBlocks(std::function<void(void*)> f);
+        static void* AllocBlock(size_t bytes);
+        static void FreeBlock(void* p);
+
+        /** Apply function to all allocated blocks (small + large). */
+        static void ApplyToAllBlocks(std::function<void(void*)> f);
 
         /** Find heap allocation start pointer. */
-        static void* lookup(void* candidate);
-
-        void apply_to_blocks(std::function<void(void*)> f);
+        static void* Lookup(void* candidate);
 
     private:
         struct Superblock {
@@ -51,13 +50,30 @@ class BlockPool {
         int m_next_superblock;
         vector<Superblock*> m_superblocks;
 
-        void* get_next_block(Superblock* superblock);
-        void update_next_superblock();
-        Superblock* add_superblock();
-        void allocate_block(Superblock* superblock, int block);
-        void registerSuperblock(int id);
+        /** Allocate a block from this block pool. */
+        void* AllocSmall();
 
-        void* alloc();
-        void free(void* p, unsigned superblock_id);
+        /** Free a block in this block pool. */
+        void FreeSmall(void* p, unsigned superblock_id);
+
+        /** Apply a function to all blocks in this pool. */
+        void ApplyToPoolBlocks(std::function<void(void*)> f);
+
+        /** Allocate a large block in the sparse block table. */
+        static void* AllocLarge(size_t bytes);
+
+        Superblock* AddSuperblock();
+
+        /** Get next free block from a superblock. */
+        void* GetNextBlock(Superblock* superblock);
+
+        /** Tag a block as allocated. */
+        void AllocateBlock(Superblock* superblock, int block);
+
+        /** Update the index to the next superblock with a free block. */
+        void UpdateNextSuperblock();
+
+        /** Add a new superblock to the block pool hash table. */
+        void RegisterSuperblock(int id);
 };
 

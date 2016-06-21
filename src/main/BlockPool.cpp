@@ -126,7 +126,7 @@ static HashBucket* bucket_from_pointer(void* p);
 FILE* logfile;
 #endif
 
-void BlockPool::initialize()
+void BlockPool::Initialize()
 {
 #ifndef NO_LOG_ALLOCS
     logfile = fopen("/usr/local/google/home/joqvist/foo.log", "w");
@@ -232,11 +232,11 @@ static void update_heap_bounds(void* allocation, size_t size)
 }
 
 // Find next power of two < 4096.
-void* BlockPool::pool_alloc(size_t bytes)
+void* BlockPool::AllocBlock(size_t bytes)
 {
     if (bytes > 4096) {
         // Default to separate allocation if block size is larger than page size.
-        void* result = separate_alloc(bytes);
+        void* result = AllocLarge(bytes);
         if (!result) {
             allocerr("returning null from alloc");
         }
@@ -251,7 +251,7 @@ void* BlockPool::pool_alloc(size_t bytes)
 #endif
         update_heap_bounds(result, bytes);
 #ifdef ALLOCATION_CHECK
-        lookup(result); // Check lookup table consistency.
+        Lookup(result); // Check lookup table consistency.
 #endif
         return result;
     }
@@ -269,7 +269,7 @@ void* BlockPool::pool_alloc(size_t bytes)
         pool = new BlockPool(block_bytes, superblock_size);
         pools[pool_index] = pool;
     }
-    void* result = pool->alloc();
+    void* result = pool->AllocSmall();
     if (!result) {
         allocerr("returning null from alloc");
     }
@@ -284,12 +284,12 @@ void* BlockPool::pool_alloc(size_t bytes)
 #endif
     update_heap_bounds(result, block_bytes);
 #ifdef ALLOCATION_CHECK
-    lookup(result); // Check lookup table consistency.
+    Lookup(result); // Check lookup table consistency.
 #endif
     return result;
 }
 
-void* BlockPool::separate_alloc(size_t bytes)
+void* BlockPool::AllocLarge(size_t bytes)
 {
     SparseHashBucket* bucket = remove_free_block(bytes);
     if (bucket) {
@@ -303,27 +303,25 @@ void* BlockPool::separate_alloc(size_t bytes)
     return bucket->data;
 }
 
-void BlockPool::pool_free(void* p)
+void BlockPool::FreeBlock(void* p)
 {
 #ifndef NO_LOG_ALLOCS
     fprintf(logfile, "free %p\n", p);
 #endif
 #ifdef ALLOCATION_CHECK
-    if (!lookup(p)) {
+    if (!Lookup(p)) {
         allocerr("can not free unknown/already-freed pointer");
     }
     remove_from_allocation_map(p);
 #endif
     HashBucket* bucket = bucket_from_pointer(p);
     if (bucket) {
-        bucket->pool->free(p, bucket->superblock_index);
-    } else if (remove_sparse_block(p)) {
-        // delete[] static_cast<double*>(p); // TODO: cleanup.
-    } else {
-        allocerr("failed to free pointer - unallocated or double-free error");
+        bucket->pool->FreeSmall(p, bucket->superblock_index);
+    } else if (!remove_sparse_block(p)) {
+        allocerr("failed to free pointer - unallocated or double-free problem");
     }
 }
-void* BlockPool::alloc()
+void* BlockPool::AllocSmall()
 {
     Superblock* superblock;
     void* block;
@@ -333,39 +331,31 @@ void* BlockPool::alloc()
         m_last_victim = (m_last_victim + 63) & 63;
         unsigned index = block >> SUPERBLOCK_BITS;
         unsigned bitset = index / 64;
-        superblock = m_superblocks[block & SUPERBLOCK_MASK];
+        unsigned superblock_index = block & SUPERBLOCK_MASK;
+        superblock = m_superblocks[superblock_index];
         superblock->num_free -= 1;
         superblock->free[bitset] &= ~(1ull << (index & 63));
-        // Update next superblock.
-        while (m_next_superblock >= 0) {
-            if (m_superblocks[m_next_superblock]->num_free > 0) {
-                break;
-            } else {
-                m_next_superblock += 1;
-                if (m_next_superblock == m_superblocks.size()) {
-                    m_next_superblock = -1;
-                    break;
-                }
-            }
+        if (superblock_index == m_next_superblock) {
+            UpdateNextSuperblock();
         }
         return reinterpret_cast<char*>(superblock)
             + std::max(sizeof(int), alignof(u64*))
             + (m_bitset_entries * 8) + index * m_block_size;
     } else if (m_next_superblock >= 0) {
         superblock = m_superblocks[m_next_superblock];
-        block = get_next_block(superblock);
-        update_next_superblock();
+        block = GetNextBlock(superblock);
+        UpdateNextSuperblock();
     } else {
         // Allocate new superblock.
-        superblock = add_superblock();
+        superblock = AddSuperblock();
         m_next_superblock = m_superblocks.size() - 1;
-        block = get_next_block(superblock);
+        block = GetNextBlock(superblock);
     }
     return block;
 }
 
 // Free a pointer inside a given superblock. The block MUST be in the given superblock.
-void BlockPool::free(void* pointer, unsigned superblock_id)
+void BlockPool::FreeSmall(void* pointer, unsigned superblock_id)
 {
     size_t block = reinterpret_cast<size_t>(pointer);
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
@@ -391,7 +381,7 @@ void BlockPool::free(void* pointer, unsigned superblock_id)
 /**
  * Inserts new superblock in hash table.
  */
-void BlockPool::registerSuperblock(int id) {
+void BlockPool::RegisterSuperblock(int id) {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     Superblock* superblock = m_superblocks[id];
     uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
@@ -439,7 +429,7 @@ HashBucket* bucket_from_pointer(void* p)
     return nullptr;
 }
 
-BlockPool::Superblock* BlockPool::add_superblock()
+BlockPool::Superblock* BlockPool::AddSuperblock()
 {
     Superblock* superblock = (Superblock*) new char[std::max(sizeof(int), alignof(u64*))
         + m_bitset_entries * 8 + m_superblock_size * m_block_size];
@@ -451,11 +441,11 @@ BlockPool::Superblock* BlockPool::add_superblock()
     uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + superblock_offset;
     uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
     m_superblocks.push_back(superblock);
-    registerSuperblock(m_superblocks.size() - 1);
+    RegisterSuperblock(m_superblocks.size() - 1);
     return superblock;
 }
 
-void BlockPool::update_next_superblock()
+void BlockPool::UpdateNextSuperblock()
 {
     int next = m_next_superblock;
     do {
@@ -470,14 +460,14 @@ void BlockPool::update_next_superblock()
 }
 
 // Tag a block as allocated.
-void BlockPool::allocate_block(Superblock* superblock, int block)
+void BlockPool::AllocateBlock(Superblock* superblock, int block)
 {
     int bitset = block / 64;
     superblock->num_free -= 1;
     superblock->free[bitset] &= ~(1ull << (block & 63));
 }
 
-void* BlockPool::get_next_block(Superblock* superblock)
+void* BlockPool::GetNextBlock(Superblock* superblock)
 {
     if (superblock->num_free > 0) {
         int block;
@@ -490,14 +480,14 @@ void* BlockPool::get_next_block(Superblock* superblock)
             }
             bitset += 1;
         } while (bitset < m_bitset_entries);
-        allocate_block(superblock, block);
+        AllocateBlock(superblock, block);
         return reinterpret_cast<char*>(superblock) + std::max(sizeof(int), alignof(u64*))
             + (m_bitset_entries * 8) + block * m_block_size;
     }
     return nullptr;
 }
 
-void BlockPool::apply_to_blocks(std::function<void(void*)> fun)
+void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun)
 {
     uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     for (auto superblock : m_superblocks) {
@@ -523,14 +513,14 @@ void BlockPool::apply_to_blocks(std::function<void(void*)> fun)
     }
 }
 
-void BlockPool::applyToAllBlocks(std::function<void(void*)> fun)
+void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun)
 {
 #ifdef ALLOCATION_CHECK
     iterating = true;
 #endif
     for (BlockPool* pool : pools) {
         if (pool) {
-            pool->apply_to_blocks(fun);
+            pool->ApplyToPoolBlocks(fun);
         }
     }
     for (int i = 0; i < NUM_BUCKET; ++i) {
@@ -545,7 +535,7 @@ void BlockPool::applyToAllBlocks(std::function<void(void*)> fun)
 #endif
 }
 
-void* BlockPool::lookup(void* candidate)
+void* BlockPool::Lookup(void* candidate)
 {
     void* result = nullptr;
     if (candidate >= heap_start && candidate < heap_end) {

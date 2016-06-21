@@ -74,7 +74,7 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes)
     MemoryBank::notifyAllocation(bytes);
     void *result;
 
-    result = BlockPool::pool_alloc(bytes);
+    result = BlockPool::AllocBlock(bytes);
 
     // Because garbage collection may occur between this point and the GCNode's
     // constructor running, we need to ensure that this space is at least
@@ -94,7 +94,7 @@ void GCNode::operator delete(void* p, size_t bytes)
 {
     MemoryBank::notifyDeallocation(bytes);
 
-    BlockPool::pool_free(p);
+    BlockPool::FreeBlock(p);
 }
 
 bool GCNode::check()
@@ -175,7 +175,7 @@ void GCNode::gclite()
 
 void GCNode::initialize()
 {
-    BlockPool::initialize();
+    BlockPool::Initialize();
     s_moribund = new vector<const GCNode*>();
 }
 
@@ -220,11 +220,11 @@ void GCNode::sweep()
     // saturated.
     vector<void*> work;
     vector<GCNode*> to_delete;
-    BlockPool::applyToAllBlocks([&](void* p) {
+    BlockPool::ApplyToAllBlocks([&](void* p) {
             work.push_back(p);
             });
     for (void* pointer : work) {
-        if (BlockPool::lookup(pointer)) {
+        if (BlockPool::Lookup(pointer)) {
             // The pointer is still allocated, so detach referents.
             GCNode* node = static_cast<GCNode*>(pointer);
             if (!node->isMarked()) {
@@ -284,7 +284,7 @@ void rho::initializeMemorySubsystem()
 // Test if the argument is a GCNode pointer.
 GCNode* GCNode::asGCNode(void* candidate_pointer)
 {
-    return static_cast<GCNode*>(BlockPool::lookup(candidate_pointer));
+    return static_cast<GCNode*>(BlockPool::Lookup(candidate_pointer));
 }
 
 GCNode::InternalData GCNode::storeInternalData() const {
