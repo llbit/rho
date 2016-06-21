@@ -302,7 +302,7 @@ void* BlockPool::AllocSmall()
     if (m_num_victims > 0) {
         unsigned block = m_victim[m_last_victim];
         m_num_victims -= 1;
-        m_last_victim = (m_last_victim + 63) & 63;
+        m_last_victim = (m_last_victim + 1023) & 1023;
         unsigned index = block >> SUPERBLOCK_BITS;
         unsigned bitset = index / 64;
         unsigned superblock_index = block & SUPERBLOCK_MASK;
@@ -344,9 +344,9 @@ void BlockPool::FreeSmall(void* pointer, unsigned superblock_id)
     }
     // Add to victim buffer only if superblock id fits in the superblock bits.
     if (superblock_id <= SUPERBLOCK_MASK) {
-        m_last_victim = (m_last_victim + 1) & 63;
+        m_last_victim = (m_last_victim + 1) & 1023;
         m_victim[m_last_victim] = (index << SUPERBLOCK_BITS) | superblock_id;
-        if (m_num_victims < 64) {
+        if (m_num_victims < 1024) {
             m_num_victims += 1;
         }
     }

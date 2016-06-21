@@ -49,7 +49,7 @@ class BlockPool {
 
         unsigned m_num_victims; // Current number of blocks in the victim buffer.
         unsigned m_last_victim; // Index to latest victim in victim buffer.
-        unsigned m_victim[64]; // Fixed size FIFO victim buffer.
+        unsigned m_victim[1024]; // Fixed size FIFO victim buffer.
         // TODO: adjust victim buffer size based on profile/benchmark results.
 
         int m_next_superblock; // Index to next superblock with a free block.
