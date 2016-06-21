@@ -51,7 +51,7 @@ struct SparseHashBucket {
     size_t size;
 };
 
-#define LOW_BITS (14)
+#define LOW_BITS (19)
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << 9)
 
@@ -236,7 +236,7 @@ void* BlockPool::AllocBlock(size_t bytes)
     if (!pool) {
         size_t superblock_size;
         if (block_bytes < 4096) {
-            superblock_size = (4 * 4096) / block_bytes;
+            superblock_size = (32 * 4096) / block_bytes;
         } else {
             superblock_size = 10;
         }
