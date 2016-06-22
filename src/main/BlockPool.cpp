@@ -230,7 +230,7 @@ void* BlockPool::AllocBlock(size_t bytes) {
     BlockPool* pool = pools[pool_index];
     if (!pool) {
         size_t superblock_size;
-        superblock_size = (32 * 4096) / block_bytes;
+        superblock_size = (64 * 4096) / block_bytes;
         pool = new BlockPool(block_bytes, superblock_size);
         pools[pool_index] = pool;
     }
