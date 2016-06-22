@@ -34,6 +34,12 @@ class BlockPool {
         /** Find heap allocation start pointer. */
         static void* Lookup(void* candidate);
 
+        /** Print allocation overview for debugging. */
+        static void DebugPrint();
+
+        /** Visualize this block pool. */
+        void DebugPrintPool();
+
     private:
         /**
          * Used as an arena for allocating blocks. The Superblock members are
