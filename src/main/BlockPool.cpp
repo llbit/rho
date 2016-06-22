@@ -51,7 +51,7 @@ struct SparseHashBucket {
     size_t size;
 };
 
-#define LOW_BITS (19)
+#define LOW_BITS (17)
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << 9)
 
@@ -568,6 +568,7 @@ void BlockPool::DebugPrint() {
         }
     }
     printf(">>>>>>>>>> DENSE TABLE\n");
+    unsigned total_size = 0;
     for (int i = 0; i < NUM_BUCKET; i += 20) {
         printf("%03d:", i);
         for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
@@ -578,10 +579,13 @@ void BlockPool::DebugPrint() {
                 bucket = bucket->next;
             }
             printf(" %*d", 2, bucket_size);
+            total_size += bucket_size;
         }
         printf("\n");
     }
+    printf("size: %d\n", total_size);
     printf(">>>>>>>>>> SPARSE TABLE\n");
+    total_size = 0;
     for (int i = 0; i < NUM_BUCKET; i += 20) {
         printf("%03d:", i);
         for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
@@ -592,10 +596,13 @@ void BlockPool::DebugPrint() {
                 bucket = bucket->next;
             }
             printf(" %*d", 2, bucket_size);
+            total_size += bucket_size;
         }
         printf("\n");
     }
+    printf("size: %d\n", total_size);
     printf(">>>>>>>>>> FREE TABLE\n");
+    total_size = 0;
     for (int i = 0; i < NUM_BUCKET; i += 20) {
         printf("%03d:", i);
         for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
@@ -606,9 +613,11 @@ void BlockPool::DebugPrint() {
                 bucket = bucket->next;
             }
             printf(" %*d", 2, bucket_size);
+            total_size += bucket_size;
         }
         printf("\n");
     }
+    printf("size: %d\n", total_size);
 }
 
 void BlockPool::DebugPrintPool() {
@@ -641,3 +650,62 @@ void BlockPool::DebugPrintPool() {
         printf("\n");
     }
 }
+
+void BlockPool::DebugRebalance(int low_bits) {
+    printf(">>>>>>>>>> DENSE TABLE (Rebalanced)\n");
+    unsigned rebalanced[NUM_BUCKET];
+    unsigned total_size = 0;
+    for (int i = 0; i < NUM_BUCKET; i += 1) {
+        rebalanced[i] = 0;
+    }
+    for (auto pool : pools) {
+        if (pool) {
+            for (auto superblock : pool->m_superblocks) {
+                uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (pool->m_bitset_entries * 8);
+                uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
+                uintptr_t superblock_end = superblock_start + pool->m_block_size * pool->m_superblock_size;
+                unsigned hash = (superblock_start >> low_bits) & (NUM_BUCKET - 1);
+                uintptr_t hash_end = ((superblock_end - 1) >> low_bits) & (NUM_BUCKET - 1);
+                while (true) {
+                    rebalanced[hash] += 1;
+                    if (hash == hash_end) {
+                        break;
+                    }
+                    hash = (hash + 1) % NUM_BUCKET;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < NUM_BUCKET; i += 20) {
+        printf("%03d:", i);
+        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
+            printf(" %*d", 2, rebalanced[i + j]);
+            total_size += rebalanced[i + j];
+        }
+        printf("\n");
+    }
+    printf("size: %d\n", total_size);
+    printf(">>>>>>>>>> SPARSE TABLE (Rebalanced)\n");
+    total_size = 0;
+    for (int i = 0; i < NUM_BUCKET; i += 1) {
+        rebalanced[i] = 0;
+    }
+    for (int i = 0; i < NUM_BUCKET; i += 1) {
+        SparseHashBucket* bucket = sparse_buckets[i];
+        while (bucket) {
+            unsigned hash = (reinterpret_cast<uintptr_t>(bucket->data) >> low_bits) & (NUM_BUCKET - 1);
+            rebalanced[hash] += 1;
+            bucket = bucket->next;
+        }
+    }
+    for (int i = 0; i < NUM_BUCKET; i += 20) {
+        printf("%03d:", i);
+        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
+            printf(" %*d", 2, rebalanced[i + j]);
+            total_size += rebalanced[i + j];
+        }
+        printf("\n");
+    }
+    printf("size: %d\n", total_size);
+}
+
