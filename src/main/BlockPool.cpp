@@ -58,8 +58,8 @@ struct SparseHashBucket {
 #define SUPERBLOCK_BITS (10)
 #define SUPERBLOCK_MASK ((1 << SUPERBLOCK_BITS) - 1)
 
-// NUM_POOLS = (1 + max block size) / 8.
-#define NUM_POOLS (513)
+// NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
+#define NUM_POOLS (33)
 
 static BlockPool* pools[NUM_POOLS];
 
@@ -201,9 +201,8 @@ static void update_heap_bounds(void* allocation, size_t size) {
     }
 }
 
-// Find next power of two < 4096.
 void* BlockPool::AllocBlock(size_t bytes) {
-    if (bytes > 4096) {
+    if (bytes > 256) {
         // Default to separate allocation if block size is larger than page size.
         void* result = AllocLarge(bytes);
         if (!result) {
@@ -230,11 +229,7 @@ void* BlockPool::AllocBlock(size_t bytes) {
     BlockPool* pool = pools[pool_index];
     if (!pool) {
         size_t superblock_size;
-        if (block_bytes < 4096) {
-            superblock_size = (32 * 4096) / block_bytes;
-        } else {
-            superblock_size = 10;
-        }
+        superblock_size = (32 * 4096) / block_bytes;
         pool = new BlockPool(block_bytes, superblock_size);
         pools[pool_index] = pool;
     }
@@ -571,6 +566,48 @@ void BlockPool::DebugPrint() {
         if (pool) {
             pool->DebugPrintPool();
         }
+    }
+    printf(">>>>>>>>>> DENSE TABLE\n");
+    for (int i = 0; i < NUM_BUCKET; i += 20) {
+        printf("%03d:", i);
+        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
+            int bucket_size = 0;
+            HashBucket* bucket = buckets[i + j];
+            while (bucket) {
+                bucket_size += 1;
+                bucket = bucket->next;
+            }
+            printf(" %*d", 2, bucket_size);
+        }
+        printf("\n");
+    }
+    printf(">>>>>>>>>> SPARSE TABLE\n");
+    for (int i = 0; i < NUM_BUCKET; i += 20) {
+        printf("%03d:", i);
+        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
+            int bucket_size = 0;
+            SparseHashBucket* bucket = sparse_buckets[i + j];
+            while (bucket) {
+                bucket_size += 1;
+                bucket = bucket->next;
+            }
+            printf(" %*d", 2, bucket_size);
+        }
+        printf("\n");
+    }
+    printf(">>>>>>>>>> FREE TABLE\n");
+    for (int i = 0; i < NUM_BUCKET; i += 20) {
+        printf("%03d:", i);
+        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
+            int bucket_size = 0;
+            SparseHashBucket* bucket = free_set[i + j];
+            while (bucket) {
+                bucket_size += 1;
+                bucket = bucket->next;
+            }
+            printf(" %*d", 2, bucket_size);
+        }
+        printf("\n");
     }
 }
 
