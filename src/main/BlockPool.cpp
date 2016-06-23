@@ -68,6 +68,13 @@ HashBucket* buckets[NUM_BUCKET];
 SparseHashBucket* sparse_buckets[NUM_BUCKET];
 SparseHashBucket* free_set[NUM_BUCKET];
 
+// Allocate a new hash bucket for the dense table.
+static HashBucket* alloc_bucket();
+static HashBucket* bucket_from_pointer(void* p);
+
+// Allocate buckets in batches to get better cache locality when iterating over buckets.
+static SparseHashBucket* alloc_sparse_bucket();
+
 inline int first_free(u64 bitset) {
     if (bitset == 0) {
         return -1;
@@ -89,11 +96,39 @@ inline int first_free(u64 bitset) {
 #endif
 }
 
-static HashBucket* bucket_from_pointer(void* p);
-
 #ifndef NO_LOG_ALLOCS
 FILE* logfile;
 #endif
+
+HashBucket* alloc_bucket() {
+    static HashBucket* buffer = nullptr;
+    static int available = 0;
+
+    if (available == 0) {
+        available = 300;
+        buffer = new HashBucket[available];
+    }
+
+    HashBucket* result = buffer;
+    buffer += 1;
+    available -= 1;
+    return result;
+}
+
+SparseHashBucket* alloc_sparse_bucket() {
+    static SparseHashBucket* buffer = nullptr;
+    static int available = 0;
+
+    if (available == 0) {
+        available = 300;
+        buffer = new SparseHashBucket[available];
+    }
+
+    SparseHashBucket* result = buffer;
+    buffer += 1;
+    available -= 1;
+    return result;
+}
 
 void BlockPool::Initialize() {
 #ifndef NO_LOG_ALLOCS
@@ -259,7 +294,7 @@ void* BlockPool::AllocLarge(size_t bytes) {
     if (bucket) {
         add_sparse_block(bucket);
     } else {
-        bucket = new SparseHashBucket();
+        bucket = alloc_sparse_bucket();
         bucket->data = new double[(bytes + 7) / 8];
         bucket->size = bytes;
         add_sparse_block(bucket);
@@ -345,7 +380,7 @@ void BlockPool::RegisterSuperblock(int id) {
             pred = bucket;
             bucket = bucket->next;
         }
-        HashBucket* new_bucket = new HashBucket();
+        HashBucket* new_bucket = alloc_bucket();
         new_bucket->pool = this;
         new_bucket->start = superblock_start;
         new_bucket->end = superblock_end;
