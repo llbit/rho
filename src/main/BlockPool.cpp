@@ -8,6 +8,12 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#undef USE_DENSE_HASH_MAP
+
+#ifdef USE_DENSE_HASH_MAP
+#include "sparsehash/dense_hash_map"
+#endif
+
 #define NO_LOG_ALLOCS
 
 #ifdef ALLOCATION_CHECK
@@ -39,19 +45,24 @@ void* heap_end = reinterpret_cast<void*>(0);
 // Hash bucket for the sparse block table and free lists.
 struct SparseHashBucket {
     SparseHashBucket* next;
-    SparseHashBucket* next_size;
     void* data;
     size_t size;
 };
-
-#define LOW_BITS (16)
-#define BUCKET_BITS (9)
-#define NUM_BUCKET (1 << 9)
 
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
 
 static BlockPool* pools[NUM_POOLS];
+
+#ifdef USE_DENSE_HASH_MAP
+using google::dense_hash_map;
+dense_hash_map<void*, SparseHashBucket*> sparse_allocs;
+dense_hash_map<unsigned, SparseHashBucket*> free_set;
+#else
+
+#define LOW_BITS (16)
+#define BUCKET_BITS (9)
+#define NUM_BUCKET (1 << 9)
 
 uintptr_t hash_ptr(uintptr_t ptr) {
     return (ptr >> LOW_BITS) & (NUM_BUCKET - 1);
@@ -59,6 +70,7 @@ uintptr_t hash_ptr(uintptr_t ptr) {
 
 SparseHashBucket* sparse_buckets[NUM_BUCKET];
 SparseHashBucket* free_set[NUM_BUCKET];
+#endif
 
 // Allocate buckets in batches to get better cache locality when iterating over buckets.
 static SparseHashBucket* alloc_sparse_bucket();
@@ -154,13 +166,23 @@ void BlockPool::Initialize() {
         pools[i] = nullptr;
     }
 
+#ifdef USE_DENSE_HASH_MAP
+    sparse_allocs.set_empty_key(nullptr);
+    sparse_allocs.set_deleted_key((void*) 1);
+    free_set.set_empty_key(-1);
+    free_set.set_deleted_key(-2);
+#else
     for (int i = 0; i < NUM_BUCKET; ++i) {
         sparse_buckets[i] = nullptr;
         free_set[i] = nullptr;
     }
+#endif
 }
 
 void add_sparse_block(SparseHashBucket* new_bucket) {
+#ifdef USE_DENSE_HASH_MAP
+    sparse_allocs[new_bucket->data] = new_bucket;
+#else
     uintptr_t pointer = reinterpret_cast<uintptr_t>(new_bucket->data);
     uintptr_t hash = hash_ptr(pointer);
 
@@ -176,11 +198,22 @@ void add_sparse_block(SparseHashBucket* new_bucket) {
     } else {
         sparse_buckets[hash] = new_bucket;
     }
+#endif
 }
 
 void add_free_block(SparseHashBucket* new_bucket);
 
 bool remove_sparse_block(void* data) {
+#ifdef USE_DENSE_HASH_MAP
+    auto iter = sparse_allocs.find(data);
+    if (iter != sparse_allocs.end()) {
+        SparseHashBucket* bucket = iter->second;
+        sparse_allocs.erase(iter);
+        add_free_block(bucket);
+        return true;
+    }
+    return false;
+#else
     uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
     uintptr_t hash = hash_ptr(pointer);
     SparseHashBucket* bucket = sparse_buckets[hash];
@@ -195,26 +228,35 @@ bool remove_sparse_block(void* data) {
         } else {
             sparse_buckets[hash] = bucket->next;
         }
-        add_free_block(bucket);
+        delete bucket;
+        //add_free_block(bucket);
         return true;
     }
     return false;
+#endif
 }
 
 // Get next bucket of same size.
 SparseHashBucket* get_next_size(SparseHashBucket* bucket) {
-    return bucket->next_size;
-    //return *(reinterpret_cast<SparseHashBucket**>(bucket->data));
+    //return bucket->next_size;
+    return *(reinterpret_cast<SparseHashBucket**>(bucket->data));
 }
 
 // Set link to next bucket of same size.
 void set_next_size(SparseHashBucket* bucket, SparseHashBucket* next) {
-    bucket->next_size = next;
-    //*(reinterpret_cast<SparseHashBucket**>(bucket->data)) = next;
+    //bucket->next_size = next;
+    *(reinterpret_cast<SparseHashBucket**>(bucket->data)) = next;
 }
 
 
 void add_free_block(SparseHashBucket* new_bucket) {
+#ifdef USE_DENSE_HASH_MAP
+    auto iter = free_set.find(new_bucket->size);
+    if (iter != free_set.end()) {
+        set_next_size(new_bucket, iter->second);
+    }
+    free_set[new_bucket->size] = new_bucket;
+#else
     uintptr_t hash = new_bucket->size & (NUM_BUCKET - 1);
 
     SparseHashBucket* bucket = free_set[hash];
@@ -235,9 +277,23 @@ void add_free_block(SparseHashBucket* new_bucket) {
     } else {
         free_set[hash] = new_bucket;
     }
+#endif
 }
 
 SparseHashBucket* remove_free_block(size_t size) {
+#ifdef USE_DENSE_HASH_MAP
+    auto iter = free_set.find(size);
+    if (iter != free_set.end()) {
+        SparseHashBucket* bucket = iter->second;
+        if (get_next_size(bucket)) {
+            iter->second = get_next_size(bucket);
+        } else {
+            free_set.erase(iter);
+        }
+        return bucket;
+    }
+    return nullptr;
+#else
     uintptr_t hash = size & (NUM_BUCKET - 1);
     SparseHashBucket* bucket = free_set[hash];
     SparseHashBucket* pred = nullptr;
@@ -265,6 +321,7 @@ SparseHashBucket* remove_free_block(size_t size) {
         return bucket;
     }
     return nullptr;
+#endif
 }
 
 static void update_heap_bounds(void* allocation, size_t size) {
@@ -333,15 +390,15 @@ void* BlockPool::AllocBlock(size_t bytes) {
 }
 
 void* BlockPool::AllocLarge(size_t bytes) {
-    SparseHashBucket* bucket = remove_free_block(bytes);
+    /*SparseHashBucket* bucket = remove_free_block(bytes);
     if (bucket) {
         add_sparse_block(bucket);
-    } else {
-        bucket = alloc_sparse_bucket();
+    } else {*/
+        SparseHashBucket* bucket = new SparseHashBucket(); // alloc_sparse_bucket();
         bucket->data = new double[(bytes + 7) / 8];
         bucket->size = bytes;
         add_sparse_block(bucket);
-    }
+    //}
     return bucket->data;
 }
 
@@ -358,7 +415,9 @@ void BlockPool::FreeBlock(void* p) {
     Superblock* superblock = SuperblockFromPointer(p);
     if (superblock) {
         superblock->pool->FreeSmall(p, superblock->index);
-    } else if (!remove_sparse_block(p)) {
+    } else if (remove_sparse_block(p)) {
+        delete[] reinterpret_cast<double*>(p);
+    } else {
         allocerr("failed to free pointer - unallocated or double-free problem");
     }
 }
@@ -465,6 +524,13 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             pool->ApplyToPoolBlocks(fun);
         }
     }
+#ifdef USE_DENSE_HASH_MAP
+    auto iter = sparse_allocs.begin();
+    while (iter != sparse_allocs.end()) {
+        fun(iter->second->data);
+        ++iter;
+    }
+#else
     for (int i = 0; i < NUM_BUCKET; ++i) {
         SparseHashBucket* bucket = sparse_buckets[i];
         while (bucket) {
@@ -472,6 +538,7 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             bucket = bucket->next;
         }
     }
+#endif
 #ifdef ALLOCATION_CHECK
     iterating = false;
 #endif
@@ -496,6 +563,12 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
+#ifdef USE_DENSE_HASH_MAP
+        auto iter = sparse_allocs.find(candidate);
+        if (iter != sparse_allocs.end()) {
+            result = iter->second->data;
+        }
+#else
         uintptr_t hash = hash_ptr(candidate_uint);
         SparseHashBucket* bucket = sparse_buckets[hash];
         SparseHashBucket* next = bucket;
@@ -508,6 +581,7 @@ void* BlockPool::Lookup(void* candidate) {
         }
         // Block not found in separate allocation list.
         //return nullptr;
+#endif
     }
 #ifdef ALLOCATION_CHECK
     if (result != lookup_in_allocation_map(candidate)) {
@@ -556,6 +630,7 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
+#ifndef USE_DENSE_HASH_MAP
     printf(">>>>>>>>>> SPARSE TABLE\n");
     unsigned total_size = 0;
     for (int i = 0; i < NUM_BUCKET; i += 20) {
@@ -590,6 +665,7 @@ void BlockPool::DebugPrint() {
         printf("\n");
     }
     printf("size: %d\n", total_size);
+#endif
 }
 
 void BlockPool::DebugPrintPool() {
@@ -624,6 +700,7 @@ void BlockPool::DebugPrintPool() {
 }
 
 void BlockPool::DebugRebalance(int low_bits) {
+#ifndef USE_DENSE_HASH_MAP
     unsigned rebalanced[NUM_BUCKET];
     unsigned total_size = 0;
     printf(">>>>>>>>>> SPARSE TABLE (Rebalanced)\n");
@@ -647,5 +724,6 @@ void BlockPool::DebugRebalance(int low_bits) {
         printf("\n");
     }
     printf("size: %d\n", total_size);
+#endif
 }
 
