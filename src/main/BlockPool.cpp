@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdio.h>
+#include <unistd.h>
 
 #define NO_LOG_ALLOCS
 
@@ -130,10 +131,43 @@ SparseHashBucket* alloc_sparse_bucket() {
     return result;
 }
 
+// Megaarena is 2 gig = 31 bits.
+#define MEGASIZE (1 << 30)
+
+#define SB_BITS (18)
+#define SB_SIZE (1 << SB_BITS)
+
+// NOTE: We use a fixed superblock header size, regardless of block size. This
+// leaves some unused bitset entries for larger block sizes.
+#define SB_HEADER_SIZE (1040)
+
+void* megaarena = nullptr;
+uintptr_t sbstart;
+uintptr_t sbend;
+uintptr_t sbnext;
+
+BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
+    : m_block_size(block_size),
+    m_next_untouched(0),
+    m_next_superblock(0),
+    m_last_freed(nullptr) {
+        m_superblock_size = (superblock_bytes - 1040) / block_size;
+        m_bitset_entries = (m_superblock_size + 63) / 64;
+}
+
 void BlockPool::Initialize() {
 #ifndef NO_LOG_ALLOCS
     logfile = fopen("/usr/local/google/home/joqvist/foo.log", "w");
 #endif
+
+    megaarena = sbrk(MEGASIZE);
+    uintptr_t start = (uintptr_t) megaarena;
+    uintptr_t end = start + MEGASIZE;
+    uintptr_t pad = SB_SIZE - (start & (SB_SIZE - 1));
+    uintptr_t num_sb = (end - sbstart) >> SB_BITS;
+    sbstart = start + pad;
+    sbend = sbstart + num_sb * SB_SIZE;
+    sbnext = sbstart;
 
     for (int i = 0; i < NUM_POOLS; ++i) {
         pools[i] = nullptr;
@@ -257,16 +291,16 @@ void* BlockPool::AllocBlock(size_t bytes) {
     }
 
     int pool_index = (bytes + 7) / 8;
-    if (pool_index < 2) {
-        // Ensure at least 16-byte blocks (to fit a FreeListEntry).
-        pool_index = 2;
+    if (pool_index < 4) {
+        // Ensure at least 32-byte blocks. This is required both to to fit a
+        // FreeListEntry (16 bytes), and to reduce the number of bytes needed
+        // for the fixed size bitset (as part of the constant SB_HEADER_SIZE).
+        pool_index = 4;
     }
     int block_bytes = pool_index * 8;
     BlockPool* pool = pools[pool_index];
     if (!pool) {
-        size_t superblock_size;
-        superblock_size = (64 * 4096) / block_bytes;
-        pool = new BlockPool(block_bytes, superblock_size);
+        pool = new BlockPool(block_bytes, SB_SIZE);
         pools[pool_index] = pool;
     }
     void* result = pool->AllocSmall();
@@ -348,9 +382,8 @@ void* BlockPool::AllocSmall() {
 // Free a pointer inside a given superblock. The block MUST be in the given superblock.
 void BlockPool::FreeSmall(void* pointer, unsigned superblock_index) {
     size_t block = reinterpret_cast<size_t>(pointer);
-    uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     Superblock* superblock = m_superblocks[superblock_index];
-    size_t superblock_start = reinterpret_cast<size_t>(superblock) + block_offset;
+    size_t superblock_start = reinterpret_cast<size_t>(superblock) + SB_HEADER_SIZE;
     size_t index = (block - superblock_start) / m_block_size;
     size_t bitset = index / 64;
     superblock->free[bitset] |= 1ull << (index & 63);
@@ -367,9 +400,8 @@ void BlockPool::FreeSmall(void* pointer, unsigned superblock_index) {
  * Inserts new superblock in hash table.
  */
 void BlockPool::RegisterSuperblock(int id) {
-    uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     Superblock* superblock = m_superblocks[id];
-    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
+    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
     uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
     uintptr_t hash = hash_ptr(superblock_start);
     uintptr_t hash_end = hash_ptr(superblock_end - 1);
@@ -414,16 +446,21 @@ HashBucket* bucket_from_pointer(void* p) {
 }
 
 BlockPool::Superblock* BlockPool::AddSuperblock() {
-    Superblock* superblock = (Superblock*) new char[std::max(sizeof(int), alignof(u64*))
-        + m_bitset_entries * 8 + m_superblock_size * m_block_size];
+    if (sbnext >= sbend) {
+        allocerr("out of superblock space");
+    }
+    Superblock* superblock = reinterpret_cast<Superblock*>(sbnext);
+    superblock->block_size = m_block_size;
+    superblock->index = m_superblocks.size();
+    superblock->pool = this;
+    sbnext += SB_SIZE;
+    // Here we mark all bitset entries as free, later we don't have to do
+    // precise range checking while iterating allocated blocks.
     for (int i = 0; i < m_bitset_entries; ++i) {
         superblock->free[i] = ~0ull;
     }
-    uintptr_t superblock_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
-    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + superblock_offset;
-    uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
     m_superblocks.push_back(superblock);
-    RegisterSuperblock(m_superblocks.size() - 1);
+    RegisterSuperblock(superblock->index);
     return superblock;
 }
 
@@ -432,14 +469,13 @@ void* BlockPool::AllocateBlock(Superblock* superblock, int block) {
     int bitset = block / 64;
     superblock->free[bitset] &= ~(1ull << (block & 63));
     return reinterpret_cast<char*>(superblock)
-            + std::max(sizeof(int), alignof(u64*))
-            + (m_bitset_entries * 8) + block * m_block_size;
+        + SB_HEADER_SIZE + block * m_block_size;
 }
 
 void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun) {
-    uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (m_bitset_entries * 8);
     for (auto superblock : m_superblocks) {
-        uintptr_t block = reinterpret_cast<uintptr_t>(superblock) + block_offset;
+        uintptr_t block = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
+        uintptr_t block_end = reinterpret_cast<uintptr_t>(superblock) + SB_SIZE;
         for (int i = 0; i < m_bitset_entries; ++i) {
             u64 bitset = superblock->free[i];
             if (bitset != ~0ull) {
@@ -654,8 +690,7 @@ void BlockPool::DebugRebalance(int low_bits) {
     for (auto pool : pools) {
         if (pool) {
             for (auto superblock : pool->m_superblocks) {
-                uintptr_t block_offset = std::max(sizeof(int), alignof(u64*)) + (pool->m_bitset_entries * 8);
-                uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + block_offset;
+                uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
                 uintptr_t superblock_end = superblock_start + pool->m_block_size * pool->m_superblock_size;
                 unsigned hash = (superblock_start >> low_bits) & (NUM_BUCKET - 1);
                 uintptr_t hash_end = ((superblock_end - 1) >> low_bits) & (NUM_BUCKET - 1);

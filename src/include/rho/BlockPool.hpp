@@ -9,20 +9,7 @@ typedef std::uint32_t u32;
 
 class BlockPool {
     public:
-        BlockPool(size_t block_size, size_t superblock_size)
-            : m_block_size(block_size),
-            m_next_untouched(0),
-            m_next_superblock(0),
-            m_last_freed(nullptr) {
-                m_bitset_entries = (superblock_size + 63) / 64;
-                m_superblock_size = m_bitset_entries * 64; // TODO shrink to page size?
-        }
-
-        ~BlockPool() {
-            for (auto superblock : m_superblocks) {
-                delete[] superblock;
-            }
-        }
+        BlockPool(size_t block_size, size_t superblock_bytes);
 
         static void Initialize();
 
@@ -49,6 +36,9 @@ class BlockPool {
          * only the header part of the structure, the rest is block-size dependent.
          */
         struct Superblock {
+            u32 block_size;
+            u32 index;
+            BlockPool* pool;
             u64 free[]; // Free bitset.
         };
 
