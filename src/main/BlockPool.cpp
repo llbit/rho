@@ -39,6 +39,7 @@ void* heap_end = reinterpret_cast<void*>(0);
 // Hash bucket for the sparse block table and free lists.
 struct SparseHashBucket {
     SparseHashBucket* next;
+    SparseHashBucket* next_size;
     void* data;
     size_t size;
 };
@@ -200,16 +201,35 @@ bool remove_sparse_block(void* data) {
     return false;
 }
 
+// Get next bucket of same size.
+SparseHashBucket* get_next_size(SparseHashBucket* bucket) {
+    return bucket->next_size;
+    //return *(reinterpret_cast<SparseHashBucket**>(bucket->data));
+}
+
+// Set link to next bucket of same size.
+void set_next_size(SparseHashBucket* bucket, SparseHashBucket* next) {
+    bucket->next_size = next;
+    //*(reinterpret_cast<SparseHashBucket**>(bucket->data)) = next;
+}
+
+
 void add_free_block(SparseHashBucket* new_bucket) {
     uintptr_t hash = new_bucket->size & (NUM_BUCKET - 1);
 
     SparseHashBucket* bucket = free_set[hash];
     SparseHashBucket* pred = nullptr;
-    while (bucket && new_bucket->size >= bucket->size) {
+    while (bucket && new_bucket->size > bucket->size) {
         pred = bucket;
         bucket = bucket->next;
     }
-    new_bucket->next = bucket;
+    if (bucket && bucket->size == new_bucket->size) {
+        set_next_size(new_bucket, bucket);
+        new_bucket->next = bucket->next;
+    } else {
+        set_next_size(new_bucket, nullptr);
+        new_bucket->next = bucket;
+    }
     if (pred) {
         pred->next = new_bucket;
     } else {
@@ -227,9 +247,20 @@ SparseHashBucket* remove_free_block(size_t size) {
     }
     if (bucket && size == bucket->size) {
         if (pred) {
-            pred->next = bucket->next;
+            if (get_next_size(bucket)) {
+                pred->next = get_next_size(bucket);
+            } else {
+                pred->next = bucket->next;
+            }
         } else {
-            free_set[hash] = bucket->next;
+            if (get_next_size(bucket)) {
+                free_set[hash] = get_next_size(bucket);
+            } else {
+                free_set[hash] = bucket->next;
+            }
+        }
+        if (get_next_size(bucket)) {
+            get_next_size(bucket)->next = bucket->next;
         }
         return bucket;
     }
