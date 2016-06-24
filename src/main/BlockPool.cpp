@@ -295,7 +295,6 @@ void* BlockPool::AllocBlock(size_t bytes) {
     }
     add_to_allocation_map(result, block_bytes);
 #endif
-    update_heap_bounds(result, block_bytes);
 #ifdef ALLOCATION_CHECK
     Lookup(result); // Check lookup table consistency.
 #endif
@@ -449,37 +448,35 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
 
 void* BlockPool::Lookup(void* candidate) {
     void* result = nullptr;
-    if (candidate >= heap_start && candidate < heap_end) {
-        uintptr_t candidate_uint = reinterpret_cast<uintptr_t>(candidate);
-        Superblock* superblock = SuperblockFromPointer(candidate);
-        if (superblock) {
-            uintptr_t first_block = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
-            if (candidate_uint < first_block) {
-                // The candidate pointer points inside the superblock header.
-                return nullptr;
-            }
-            unsigned index = (candidate_uint - first_block) / superblock->block_size;
-            unsigned bitset = index / 64;
-            if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
-                result = reinterpret_cast<char*>(first_block) + index * superblock->block_size;
-            } else {
-                // The block is not allocated.
-                result = nullptr;
-            }
-        } else {
-            uintptr_t hash = hash_ptr(candidate_uint);
-            SparseHashBucket* bucket = sparse_buckets[hash];
-            SparseHashBucket* next = bucket;
-            while (next && candidate >= next->data) {
-                bucket = next;
-                next = next->next;
-            }
-            if (bucket && bucket->data <= candidate && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > candidate_uint) {
-                result = bucket->data;
-            }
-            // Block not found in separate allocation list.
-            //return nullptr;
+    uintptr_t candidate_uint = reinterpret_cast<uintptr_t>(candidate);
+    Superblock* superblock = SuperblockFromPointer(candidate);
+    if (superblock) {
+        uintptr_t first_block = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
+        if (candidate_uint < first_block) {
+            // The candidate pointer points inside the superblock header.
+            return nullptr;
         }
+        unsigned index = (candidate_uint - first_block) / superblock->block_size;
+        unsigned bitset = index / 64;
+        if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
+            result = reinterpret_cast<char*>(first_block) + index * superblock->block_size;
+        } else {
+            // The block is not allocated.
+            result = nullptr;
+        }
+    } else if (candidate >= heap_start && candidate < heap_end) {
+        uintptr_t hash = hash_ptr(candidate_uint);
+        SparseHashBucket* bucket = sparse_buckets[hash];
+        SparseHashBucket* next = bucket;
+        while (next && candidate >= next->data) {
+            bucket = next;
+            next = next->next;
+        }
+        if (bucket && bucket->data <= candidate && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > candidate_uint) {
+            result = bucket->data;
+        }
+        // Block not found in separate allocation list.
+        //return nullptr;
     }
 #ifdef ALLOCATION_CHECK
     if (result != lookup_in_allocation_map(candidate)) {
