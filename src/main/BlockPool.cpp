@@ -43,7 +43,7 @@ struct SparseHashBucket {
     size_t size;
 };
 
-#define LOW_BITS (16)
+#define LOW_BITS (7)
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << 9)
 
