@@ -36,15 +36,6 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
-// Hash bucket for the dense block table.
-struct HashBucket {
-    HashBucket* next;
-    BlockPool* pool;
-    uintptr_t start;
-    uintptr_t end;
-    unsigned superblock_index;
-};
-
 // Hash bucket for the sparse block table and free lists.
 struct SparseHashBucket {
     SparseHashBucket* next;
@@ -65,13 +56,8 @@ uintptr_t hash_ptr(uintptr_t ptr) {
     return (ptr >> LOW_BITS) & (NUM_BUCKET - 1);
 }
 
-HashBucket* buckets[NUM_BUCKET];
 SparseHashBucket* sparse_buckets[NUM_BUCKET];
 SparseHashBucket* free_set[NUM_BUCKET];
-
-// Allocate a new hash bucket for the dense table.
-static HashBucket* alloc_bucket();
-static HashBucket* bucket_from_pointer(void* p);
 
 // Allocate buckets in batches to get better cache locality when iterating over buckets.
 static SparseHashBucket* alloc_sparse_bucket();
@@ -100,21 +86,6 @@ inline int first_free(u64 bitset) {
 #ifndef NO_LOG_ALLOCS
 FILE* logfile;
 #endif
-
-HashBucket* alloc_bucket() {
-    static HashBucket* buffer = nullptr;
-    static int available = 0;
-
-    if (available == 0) {
-        available = 300;
-        buffer = new HashBucket[available];
-    }
-
-    HashBucket* result = buffer;
-    buffer += 1;
-    available -= 1;
-    return result;
-}
 
 SparseHashBucket* alloc_sparse_bucket() {
     static SparseHashBucket* buffer = nullptr;
@@ -146,6 +117,15 @@ uintptr_t sbstart;
 uintptr_t sbend;
 uintptr_t sbnext;
 
+BlockPool::Superblock* BlockPool::SuperblockFromPointer(void* p) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(p);
+    if (pointer >= sbstart && pointer < sbnext) {
+        return reinterpret_cast<Superblock*>(pointer & (~static_cast<uintptr_t>(SB_SIZE - 1)));
+    } else {
+        return nullptr;
+    }
+}
+
 BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
     : m_block_size(block_size),
     m_next_untouched(0),
@@ -174,7 +154,6 @@ void BlockPool::Initialize() {
     }
 
     for (int i = 0; i < NUM_BUCKET; ++i) {
-        buckets[i] = nullptr;
         sparse_buckets[i] = nullptr;
         free_set[i] = nullptr;
     }
@@ -346,9 +325,9 @@ void BlockPool::FreeBlock(void* p) {
     }
     remove_from_allocation_map(p);
 #endif
-    HashBucket* bucket = bucket_from_pointer(p);
-    if (bucket) {
-        bucket->pool->FreeSmall(p, bucket->superblock_index);
+    Superblock* superblock = SuperblockFromPointer(p);
+    if (superblock) {
+        superblock->pool->FreeSmall(p, superblock->index);
     } else if (!remove_sparse_block(p)) {
         allocerr("failed to free pointer - unallocated or double-free problem");
     }
@@ -396,55 +375,6 @@ void BlockPool::FreeSmall(void* pointer, unsigned superblock_index) {
     m_last_freed = node;
 }
 
-/**
- * Inserts new superblock in hash table.
- */
-void BlockPool::RegisterSuperblock(int id) {
-    Superblock* superblock = m_superblocks[id];
-    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
-    uintptr_t superblock_end = superblock_start + m_block_size * m_superblock_size;
-    uintptr_t hash = hash_ptr(superblock_start);
-    uintptr_t hash_end = hash_ptr(superblock_end - 1);
-    while (true) {
-        HashBucket* bucket = buckets[hash];
-        HashBucket* pred = nullptr;
-        while (bucket && superblock_start > bucket->start) {
-            pred = bucket;
-            bucket = bucket->next;
-        }
-        HashBucket* new_bucket = alloc_bucket();
-        new_bucket->pool = this;
-        new_bucket->start = superblock_start;
-        new_bucket->end = superblock_end;
-        new_bucket->superblock_index = id;
-        new_bucket->next = bucket;
-        if (!pred) {
-            buckets[hash] = new_bucket;
-        } else {
-            pred->next = new_bucket;
-        }
-        if (hash == hash_end) {
-            break;
-        }
-        hash = (hash + 1) % NUM_BUCKET;
-    }
-}
-
-HashBucket* bucket_from_pointer(void* p) {
-    uintptr_t pointer = reinterpret_cast<uintptr_t>(p);
-    uintptr_t hash = hash_ptr(pointer);
-    HashBucket* bucket = buckets[hash];
-    HashBucket* next = bucket;
-    while (next && pointer >= next->start) {
-        bucket = next;
-        next = next->next;
-    }
-    if (bucket && pointer >= bucket->start && pointer < bucket->end) {
-        return bucket;
-    }
-    return nullptr;
-}
-
 BlockPool::Superblock* BlockPool::AddSuperblock() {
     if (sbnext >= sbend) {
         allocerr("out of superblock space");
@@ -460,7 +390,6 @@ BlockPool::Superblock* BlockPool::AddSuperblock() {
         superblock->free[i] = ~0ull;
     }
     m_superblocks.push_back(superblock);
-    RegisterSuperblock(superblock->index);
     return superblock;
 }
 
@@ -521,28 +450,31 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
 void* BlockPool::Lookup(void* candidate) {
     void* result = nullptr;
     if (candidate >= heap_start && candidate < heap_end) {
-        HashBucket* bucket = bucket_from_pointer(candidate);
-        if (bucket) {
-            BlockPool* pool = bucket->pool;
-            Superblock* superblock = pool->m_superblocks[bucket->superblock_index];
-
-            unsigned index = (reinterpret_cast<uintptr_t>(candidate) - bucket->start) / pool->m_block_size;
+        uintptr_t candidate_uint = reinterpret_cast<uintptr_t>(candidate);
+        Superblock* superblock = SuperblockFromPointer(candidate);
+        if (superblock) {
+            uintptr_t first_block = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
+            if (candidate_uint < first_block) {
+                // The candidate pointer points inside the superblock header.
+                return nullptr;
+            }
+            unsigned index = (candidate_uint - first_block) / superblock->block_size;
             unsigned bitset = index / 64;
             if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
-                result = reinterpret_cast<char*>(bucket->start) + index * pool->m_block_size;
+                result = reinterpret_cast<char*>(first_block) + index * superblock->block_size;
             } else {
                 // The block is not allocated.
                 result = nullptr;
             }
         } else {
-            uintptr_t hash = hash_ptr(reinterpret_cast<uintptr_t>(candidate));
+            uintptr_t hash = hash_ptr(candidate_uint);
             SparseHashBucket* bucket = sparse_buckets[hash];
             SparseHashBucket* next = bucket;
             while (next && candidate >= next->data) {
                 bucket = next;
                 next = next->next;
             }
-            if (bucket && bucket->data <= candidate && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > reinterpret_cast<uintptr_t>(candidate)) {
+            if (bucket && bucket->data <= candidate && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > candidate_uint) {
                 result = bucket->data;
             }
             // Block not found in separate allocation list.
@@ -596,25 +528,8 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
-    printf(">>>>>>>>>> DENSE TABLE\n");
-    unsigned total_size = 0;
-    for (int i = 0; i < NUM_BUCKET; i += 20) {
-        printf("%03d:", i);
-        for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {
-            int bucket_size = 0;
-            HashBucket* bucket = buckets[i + j];
-            while (bucket) {
-                bucket_size += 1;
-                bucket = bucket->next;
-            }
-            printf(" %*d", 2, bucket_size);
-            total_size += bucket_size;
-        }
-        printf("\n");
-    }
-    printf("size: %d\n", total_size);
     printf(">>>>>>>>>> SPARSE TABLE\n");
-    total_size = 0;
+    unsigned total_size = 0;
     for (int i = 0; i < NUM_BUCKET; i += 20) {
         printf("%03d:", i);
         for (int j = 0; j < 20 && j + i < NUM_BUCKET; ++j) {

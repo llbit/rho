@@ -78,7 +78,7 @@ class BlockPool {
         /** Tag a block as allocated. */
         void* AllocateBlock(Superblock* superblock, int block);
 
-        /** Add a new superblock to the block pool hash table. */
-        void RegisterSuperblock(int id);
+        /** Tag a block as allocated. */
+        static Superblock* SuperblockFromPointer(void* pointer);
 };
 
