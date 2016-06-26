@@ -43,7 +43,7 @@ struct SparseHashBucket {
     size_t size;
 };
 
-#define LOW_BITS (12)
+#define LOW_BITS (8)
 #define BUCKET_BITS (9)
 #define NUM_BUCKET (1 << BUCKET_BITS)
 
@@ -57,7 +57,9 @@ struct SparseHashBucket {
 static BlockPool* pools[NUM_POOLS];
 
 uintptr_t hash_ptr(uintptr_t ptr) {
-    return (ptr >> LOW_BITS) & (NUM_SPARSE_BUCKET - 1);
+    uintptr_t mid_bits = (ptr >> LOW_BITS);
+    uintptr_t hash = (mid_bits >> SPARSE_BITS) ^ mid_bits;
+    return hash & (NUM_SPARSE_BUCKET - 1);
 }
 
 SparseHashBucket* sparse_buckets[NUM_SPARSE_BUCKET];
@@ -185,7 +187,7 @@ void add_sparse_block(SparseHashBucket* new_bucket) {
     for (int i = 0; i < QUAD_TRIES; ++i) {
         unsigned index = (hash + i * i) & (NUM_SPARSE_BUCKET - 1);
         SparseHashBucket* bucket = sparse_buckets[index];
-        if (!bucket || bucket == deleted_bucket) {
+        if (!bucket || (bucket == deleted_bucket)) {
             sparse_buckets[index] = new_bucket;
             return;
         }
@@ -570,6 +572,23 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
+
+    printf(">>>>> SPARSE TABLE\n");
+    for (int i = 0; i < NUM_SPARSE_BUCKET; i += 16) {
+        int count = 0;
+        for (int j = 0; j < 16 && i + j < NUM_SPARSE_BUCKET; ++j) {
+            SparseHashBucket* bucket = sparse_buckets[i + j];
+            if (bucket && bucket != deleted_bucket) {
+                count += 1;
+            }
+        }
+        if (count) {
+            printf("%X", count);
+        } else {
+            printf(".");
+        }
+    }
+    printf("\n");
 }
 
 void BlockPool::DebugPrintPool() {
