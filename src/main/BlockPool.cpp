@@ -420,8 +420,8 @@ void* BlockPool::AllocLarge(size_t bytes) {
         bucket->data = new double[(bytes + 7) / 8];
         bucket->size = bytes;
         add_sparse_block(bucket);
-        //redundant_alloc(bytes);
-        //redundant_alloc(bytes);
+        redundant_alloc(bytes);
+        redundant_alloc(bytes);
     }
     return bucket->data;
 }
