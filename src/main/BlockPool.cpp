@@ -51,6 +51,7 @@ unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
 #define MAX_COLLISIONS 10
+#define MAX_REBALANCE_COLLISIONS 3
 
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
@@ -197,7 +198,7 @@ bool rebalance_sparse_table(unsigned new_sparse_bits) {
         if (bucket && bucket != deleted_bucket) {
             unsigned hash = hash_ptr(reinterpret_cast<uintptr_t>(bucket->data), new_mask);
             bool placed = false;
-            for (int j = 0; j < MAX_COLLISIONS; ++j) {
+            for (int j = 0; j < MAX_REBALANCE_COLLISIONS; ++j) {
                 if (!new_table[hash]) {
                     new_table[hash] = bucket;
                     placed = true;
