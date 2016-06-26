@@ -400,7 +400,11 @@ static void redundant_alloc(size_t bytes) {
     HashBucket* bucket2 = alloc_sparse_bucket();
     bucket2->data = new double[(bytes + 7) / 8];
     bucket2->size = bytes;
+    HashBucket* bucket3 = alloc_sparse_bucket();
+    bucket3->data = new double[(bytes + 7) / 8];
+    bucket3->size = bytes;
     // Add in reverse order because the free list is FIFO.
+    add_free_block(bucket3);
     add_free_block(bucket2);
     add_free_block(bucket1);
 }
