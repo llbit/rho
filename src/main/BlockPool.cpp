@@ -80,17 +80,6 @@ unsigned add_collision = 0;
 unsigned remove_collision = 0;
 unsigned lookup_collision = 0;
 
-unsigned sparse_size() {
-    unsigned size = 0;
-    for (int i = 0; i < num_sparse_buckets; ++i) {
-        HashBucket* bucket = sparse_buckets[i];
-        if (bucket && bucket != deleted_bucket) {
-            size += 1;
-        }
-    }
-    return size;
-}
-
 // Allocate buckets in batches to get better cache locality when iterating over buckets.
 static HashBucket* alloc_sparse_bucket();
 
@@ -405,10 +394,15 @@ void* BlockPool::AllocBlock(size_t bytes) {
 }
 
 static void redundant_alloc(size_t bytes) {
-    HashBucket* bucket = alloc_sparse_bucket();
-    bucket->data = new double[(bytes + 7) / 8];
-    bucket->size = bytes;
-    add_free_block(bucket);
+    HashBucket* bucket1 = alloc_sparse_bucket();
+    bucket1->data = new double[(bytes + 7) / 8];
+    bucket1->size = bytes;
+    HashBucket* bucket2 = alloc_sparse_bucket();
+    bucket2->data = new double[(bytes + 7) / 8];
+    bucket2->size = bytes;
+    // Add in reverse order because the free list is FIFO.
+    add_free_block(bucket2);
+    add_free_block(bucket1);
 }
 
 void* BlockPool::AllocLarge(size_t bytes) {
@@ -420,7 +414,6 @@ void* BlockPool::AllocLarge(size_t bytes) {
         bucket->data = new double[(bytes + 7) / 8];
         bucket->size = bytes;
         add_sparse_block(bucket);
-        redundant_alloc(bytes);
         redundant_alloc(bytes);
     }
     return bucket->data;
@@ -633,15 +626,9 @@ void* lookup_in_allocation_map(void* tentative_pointer) {
 }
 #endif
 
-
-void BlockPool::DebugPrint() {
-    for (auto pool : pools) {
-        if (pool) {
-            pool->DebugPrintPool();
-        }
-    }
-
+static void print_sparse_table() {
     printf(">>>>> SPARSE TABLE\n");
+    int size = 0;
     for (int i = 0; i < num_sparse_buckets; i += 16) {
         int count = 0;
         for (int j = 0; j < 16 && i + j < num_sparse_buckets; ++j) {
@@ -655,8 +642,19 @@ void BlockPool::DebugPrint() {
         } else {
             printf(".");
         }
+        size += count;
     }
     printf("\n");
+    printf("table size: %d\n", size);
+}
+
+void BlockPool::DebugPrint() {
+    for (auto pool : pools) {
+        if (pool) {
+            pool->DebugPrintPool();
+        }
+    }
+    print_sparse_table();
 }
 
 void BlockPool::DebugPrintPool() {
@@ -690,6 +688,8 @@ void BlockPool::DebugPrintPool() {
     }
 }
 
-void BlockPool::DebugRebalance(int low_bits) {
+void BlockPool::DebugRebalance(int new_bits) {
+    rebalance_sparse_table(new_bits);
+    print_sparse_table();
 }
 
