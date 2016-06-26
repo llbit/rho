@@ -50,7 +50,7 @@ unsigned sparse_bits = 16;
 unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
-#define MAX_COLLISIONS 10
+#define MAX_COLLISIONS 6
 #define MAX_REBALANCE_COLLISIONS 3
 
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
