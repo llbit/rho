@@ -37,8 +37,8 @@ void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
 // Hash bucket for the sparse block table and free lists.
-struct SparseHashBucket {
-    SparseHashBucket* next;
+struct HashBucket {
+    HashBucket* next;
     void* data;
     size_t size;
 };
@@ -46,33 +46,35 @@ struct SparseHashBucket {
 #define BUCKET_BITS (9)
 #define NUM_FREE_BUCKETS (1 << BUCKET_BITS)
 
-#define SPARSE_BITS (16)
-#define NUM_SPARSE_BUCKETS (1 << SPARSE_BITS)
-#define MAX_COLLISIONS 20
+unsigned sparse_bits = 16;
+unsigned num_sparse_buckets = 1 << sparse_bits;
+unsigned hash_mask = num_sparse_buckets - 1;
+
+#define MAX_COLLISIONS 10
 
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
 
 static BlockPool* pools[NUM_POOLS];
 
-unsigned hash_ptr(uintptr_t ptr) {
+static unsigned hash_ptr(uintptr_t ptr, unsigned hash_mask) {
     unsigned low = ptr & 0xFFFFFFFF;
     unsigned hi = (ptr >> 32) & 0xFFFFFFFF;
     unsigned hash = low ^ hi;
     low = hash & 0xFFFF;
     hi = (hash >> 16) & 0xFFFF;
-    hash = low ^ hi;
-    return hash & (NUM_SPARSE_BUCKETS - 1);
+    hash = low ^ hi ^ (ptr & (~0xFFFF));
+    return hash & hash_mask;
 }
 
-unsigned probe_func(unsigned hash, int i) {
-    return (hash + i + 1) & (NUM_SPARSE_BUCKETS - 1);
+static unsigned probe_func(unsigned hash, int i, unsigned hash_mask) {
+    return (hash + i + 1) & hash_mask;
 }
 
-SparseHashBucket* sparse_buckets[NUM_SPARSE_BUCKETS];
-SparseHashBucket* free_set[NUM_FREE_BUCKETS];
+HashBucket** sparse_buckets = nullptr;
+HashBucket* free_set[NUM_FREE_BUCKETS];
 
-SparseHashBucket* deleted_bucket = reinterpret_cast<SparseHashBucket*>(-1);
+HashBucket* deleted_bucket = reinterpret_cast<HashBucket*>(-1);
 
 unsigned add_collision = 0;
 unsigned remove_collision = 0;
@@ -80,8 +82,8 @@ unsigned lookup_collision = 0;
 
 unsigned sparse_size() {
     unsigned size = 0;
-    for (int i = 0; i < NUM_SPARSE_BUCKETS; ++i) {
-        SparseHashBucket* bucket = sparse_buckets[i];
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        HashBucket* bucket = sparse_buckets[i];
         if (bucket && bucket != deleted_bucket) {
             size += 1;
         }
@@ -90,7 +92,7 @@ unsigned sparse_size() {
 }
 
 // Allocate buckets in batches to get better cache locality when iterating over buckets.
-static SparseHashBucket* alloc_sparse_bucket();
+static HashBucket* alloc_sparse_bucket();
 
 inline int first_free(u64 bitset) {
     if (bitset == 0) {
@@ -117,16 +119,16 @@ inline int first_free(u64 bitset) {
 FILE* logfile;
 #endif
 
-SparseHashBucket* alloc_sparse_bucket() {
-    static SparseHashBucket* buffer = nullptr;
+HashBucket* alloc_sparse_bucket() {
+    static HashBucket* buffer = nullptr;
     static int available = 0;
 
     if (available == 0) {
         available = 300;
-        buffer = new SparseHashBucket[available];
+        buffer = new HashBucket[available];
     }
 
-    SparseHashBucket* result = buffer;
+    HashBucket* result = buffer;
     buffer += 1;
     available -= 1;
     return result;
@@ -187,33 +189,76 @@ void BlockPool::Initialize() {
         free_set[i] = nullptr;
     }
 
-    for (int i = 0; i < NUM_SPARSE_BUCKETS; ++i) {
+    sparse_buckets = new HashBucket*[num_sparse_buckets];
+    for (int i = 0; i < num_sparse_buckets; ++i) {
         sparse_buckets[i] = nullptr;
     }
 }
 
-void add_sparse_block(SparseHashBucket* new_bucket) {
-    uintptr_t pointer = reinterpret_cast<uintptr_t>(new_bucket->data);
-    unsigned hash = hash_ptr(pointer);
-    for (int i = 0; i < MAX_COLLISIONS; ++i) {
-        SparseHashBucket* bucket = sparse_buckets[hash];
-        if (!bucket || (bucket == deleted_bucket)) {
-            sparse_buckets[hash] = new_bucket;
-            return;
-        }
-        add_collision += 1;
-        hash = probe_func(hash, i);
+bool rebalance_sparse_table(unsigned new_sparse_bits) {
+    unsigned new_table_size = 1 << new_sparse_bits;
+    unsigned new_mask = new_table_size - 1;
+    HashBucket** new_table = new HashBucket*[new_table_size];
+    for (int i = 0; i < new_table_size; ++i) {
+        new_table[i] = nullptr;
     }
-    allocerr("sparse table is too full");
+    // Build new table.
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        HashBucket* bucket = sparse_buckets[i];
+        if (bucket && bucket != deleted_bucket) {
+            unsigned hash = hash_ptr(reinterpret_cast<uintptr_t>(bucket->data), new_mask);
+            bool placed = false;
+            for (int j = 0; j < MAX_COLLISIONS; ++j) {
+                if (!new_table[hash]) {
+                    new_table[hash] = bucket;
+                    placed = true;
+                    break;
+                }
+                hash = probe_func(hash, j, new_mask);
+            }
+            if (!placed) {
+                delete new_table;
+                return false;
+            }
+        }
+    }
+    // Replace the old table.
+    delete sparse_buckets;
+    sparse_buckets = new_table;
+    sparse_bits = new_sparse_bits;
+    num_sparse_buckets = new_table_size;
+    hash_mask = new_mask;
+    return true;
 }
 
-void add_free_block(SparseHashBucket* new_bucket);
+void add_sparse_block(HashBucket* new_bucket) {
+    uintptr_t pointer = reinterpret_cast<uintptr_t>(new_bucket->data);
+    while (true) {
+        unsigned hash = hash_ptr(pointer, hash_mask);
+        for (int i = 0; i < MAX_COLLISIONS; ++i) {
+            HashBucket* bucket = sparse_buckets[hash];
+            if (!bucket || (bucket == deleted_bucket)) {
+                sparse_buckets[hash] = new_bucket;
+                return;
+            }
+            add_collision += 1;
+            hash = probe_func(hash, i, hash_mask);
+        }
+        // Too many collisions, rebalance the hash table.
+        unsigned new_sparse_bits = sparse_bits;
+        do {
+            new_sparse_bits += 1;
+        } while (!rebalance_sparse_table(new_sparse_bits));
+    }
+}
+
+void add_free_block(HashBucket* new_bucket);
 
 bool remove_sparse_block(void* data) {
     uintptr_t pointer = reinterpret_cast<uintptr_t>(data);
-    unsigned hash = hash_ptr(pointer);
+    unsigned hash = hash_ptr(pointer, hash_mask);
     for (int i = 0; i < MAX_COLLISIONS; ++i) {
-        SparseHashBucket* bucket = sparse_buckets[hash];
+        HashBucket* bucket = sparse_buckets[hash];
         if (bucket && bucket != deleted_bucket && bucket->data == data) {
             sparse_buckets[hash] = deleted_bucket;
             add_free_block(bucket);
@@ -223,29 +268,29 @@ bool remove_sparse_block(void* data) {
             break;
         }
         remove_collision += 1;
-        hash = probe_func(hash, i);
+        hash = probe_func(hash, i, hash_mask);
     }
     return false;
 }
 
 // Get next bucket of same size.
-SparseHashBucket* get_next_size(SparseHashBucket* bucket) {
+HashBucket* get_next_size(HashBucket* bucket) {
     //return bucket->next_size;
-    return *(reinterpret_cast<SparseHashBucket**>(bucket->data));
+    return *(reinterpret_cast<HashBucket**>(bucket->data));
 }
 
 // Set link to next bucket of same size.
-void set_next_size(SparseHashBucket* bucket, SparseHashBucket* next) {
+void set_next_size(HashBucket* bucket, HashBucket* next) {
     //bucket->next_size = next;
-    *(reinterpret_cast<SparseHashBucket**>(bucket->data)) = next;
+    *(reinterpret_cast<HashBucket**>(bucket->data)) = next;
 }
 
 
-void add_free_block(SparseHashBucket* new_bucket) {
+void add_free_block(HashBucket* new_bucket) {
     uintptr_t hash = new_bucket->size & (NUM_FREE_BUCKETS - 1);
 
-    SparseHashBucket* bucket = free_set[hash];
-    SparseHashBucket* pred = nullptr;
+    HashBucket* bucket = free_set[hash];
+    HashBucket* pred = nullptr;
     while (bucket && new_bucket->size > bucket->size) {
         pred = bucket;
         bucket = bucket->next;
@@ -264,10 +309,10 @@ void add_free_block(SparseHashBucket* new_bucket) {
     }
 }
 
-SparseHashBucket* remove_free_block(size_t size) {
+HashBucket* remove_free_block(size_t size) {
     uintptr_t hash = size & (NUM_FREE_BUCKETS - 1);
-    SparseHashBucket* bucket = free_set[hash];
-    SparseHashBucket* pred = nullptr;
+    HashBucket* bucket = free_set[hash];
+    HashBucket* pred = nullptr;
     while (bucket && size > bucket->size) {
         pred = bucket;
         bucket = bucket->next;
@@ -359,8 +404,15 @@ void* BlockPool::AllocBlock(size_t bytes) {
     return result;
 }
 
+static void redundant_alloc(size_t bytes) {
+    HashBucket* bucket = alloc_sparse_bucket();
+    bucket->data = new double[(bytes + 7) / 8];
+    bucket->size = bytes;
+    add_free_block(bucket);
+}
+
 void* BlockPool::AllocLarge(size_t bytes) {
-    SparseHashBucket* bucket = remove_free_block(bytes);
+    HashBucket* bucket = remove_free_block(bytes);
     if (bucket) {
         add_sparse_block(bucket);
     } else {
@@ -368,6 +420,8 @@ void* BlockPool::AllocLarge(size_t bytes) {
         bucket->data = new double[(bytes + 7) / 8];
         bucket->size = bytes;
         add_sparse_block(bucket);
+        //redundant_alloc(bytes);
+        //redundant_alloc(bytes);
     }
     return bucket->data;
 }
@@ -492,8 +546,8 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             pool->ApplyToPoolBlocks(fun);
         }
     }
-    for (int i = 0; i < NUM_SPARSE_BUCKETS; ++i) {
-        SparseHashBucket* bucket = sparse_buckets[i];
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        HashBucket* bucket = sparse_buckets[i];
         if (bucket && bucket != deleted_bucket) {
             fun(bucket->data);
         }
@@ -522,9 +576,9 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-        unsigned hash = hash_ptr(candidate_uint);
+        unsigned hash = hash_ptr(candidate_uint, hash_mask);
         for (int i = 0; i < MAX_COLLISIONS; ++i) {
-            SparseHashBucket* bucket = sparse_buckets[hash];
+            HashBucket* bucket = sparse_buckets[hash];
             if (bucket && bucket != deleted_bucket && bucket->data <= candidate
                     && (reinterpret_cast<uintptr_t>(bucket->data) + bucket->size) > candidate_uint) {
                 result = bucket->data;
@@ -534,7 +588,7 @@ void* BlockPool::Lookup(void* candidate) {
                 break;
             }
             lookup_collision += 1;
-            hash = probe_func(hash, i);
+            hash = probe_func(hash, i, hash_mask);
         }
         // Block not found in separate allocation list.
         //return nullptr;
@@ -588,10 +642,10 @@ void BlockPool::DebugPrint() {
     }
 
     printf(">>>>> SPARSE TABLE\n");
-    for (int i = 0; i < NUM_SPARSE_BUCKETS; i += 16) {
+    for (int i = 0; i < num_sparse_buckets; i += 16) {
         int count = 0;
-        for (int j = 0; j < 16 && i + j < NUM_SPARSE_BUCKETS; ++j) {
-            SparseHashBucket* bucket = sparse_buckets[i + j];
+        for (int j = 0; j < 16 && i + j < num_sparse_buckets; ++j) {
+            HashBucket* bucket = sparse_buckets[i + j];
             if (bucket && bucket != deleted_bucket) {
                 count += 1;
             }
