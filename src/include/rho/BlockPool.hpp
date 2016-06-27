@@ -71,7 +71,7 @@ class BlockPool {
         void ApplyToPoolBlocks(std::function<void(void*)> f);
 
         /** Allocate a large block in the sparse block table. */
-        static void* AllocLarge(size_t bytes);
+        static void* AllocLarge(unsigned bytes);
 
         Superblock* AddSuperblock();
 
