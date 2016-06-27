@@ -51,7 +51,7 @@ unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
 // The low pointer bits are masked out in the hash function.
-#define LOW_BITS (4)
+#define LOW_BITS (8)
 #define MAX_COLLISIONS (6)
 #define MAX_REBALANCE_COLLISIONS (3)
 
