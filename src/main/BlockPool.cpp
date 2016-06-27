@@ -204,7 +204,7 @@ void BlockPool::Initialize() {
 }
 
 bool rebalance_sparse_table(unsigned new_sparse_bits) {
-    if (new_sparse_bits > 29) {
+    if (new_sparse_bits > 31) {
         allocerr("sparse table is too large");
     }
     unsigned new_table_size = 1 << new_sparse_bits;
