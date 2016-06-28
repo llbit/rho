@@ -34,7 +34,7 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
-#define SKIPLIST_DEPTH (5)
+#define SKIPLIST_DEPTH (6)
 
 struct SkipNode {
     SkipNode* next[SKIPLIST_DEPTH];
@@ -248,7 +248,7 @@ void add_sparse_block(uintptr_t data, size_t size) {
     for (int level = SKIPLIST_DEPTH - 1; level >= 0; --level) {
         new_node->next[level] = prev[level]->next[level];
         prev[level]->next[level] = new_node;
-        if (level > 1 && (prng() & 3) != 0) {
+        if (level > 1 && (prng() & 1) == 0) {
             break;
         }
     }
