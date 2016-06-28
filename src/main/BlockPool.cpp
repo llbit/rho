@@ -8,8 +8,6 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define NO_LOG_ALLOCS
-
 #ifdef ALLOCATION_CHECK
 typedef std::map<void*, void*> allocation_map;
 static allocation_map allocations;
@@ -36,8 +34,10 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
+#define SKIPLIST_DEPTH (5)
+
 struct SkipNode {
-    SkipNode* next[4];
+    SkipNode* next[SKIPLIST_DEPTH];
     uintptr_t data;
     unsigned size;
 };
@@ -135,10 +135,6 @@ static unsigned next_log2_32(int size) {
     return log2;
 }
 
-#ifndef NO_LOG_ALLOCS
-FILE* logfile;
-#endif
-
 // Megaarena is 2 gig = 31 bits.
 #define MEGASIZE (1 << 30)
 
@@ -175,10 +171,6 @@ BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
 }
 
 void BlockPool::Initialize() {
-#ifndef NO_LOG_ALLOCS
-    logfile = fopen("/usr/local/google/home/joqvist/foo.log", "w");
-#endif
-
     megaarena = sbrk(MEGASIZE);
     uintptr_t start = (uintptr_t) megaarena;
     uintptr_t end = start + MEGASIZE;
@@ -197,32 +189,30 @@ void BlockPool::Initialize() {
     }
 
     tail = new SkipNode();
-    tail->next[0] = nullptr;
-    tail->next[1] = nullptr;
-    tail->next[2] = nullptr;
-    tail->next[3] = nullptr;
     tail->data = UINTPTR_MAX;
     tail->size = 0;
     head = new SkipNode();
-    head->next[0] = tail;
-    head->next[1] = tail;
-    head->next[2] = tail;
-    head->next[3] = tail;
     head->data = 0;
     head->size = 0;
+    for (int i = 0; i < SKIPLIST_DEPTH; ++i) {
+        tail->next[i] = nullptr;
+        head->next[i] = tail;
+    }
 }
 
-int next_depth() {
-    static int depth[] = { 1, 1, 1, 2, 2, 3, 3, 4 };
-    static int i = 0;
-    i = i % 8;
-    return depth[i++];
+u64 x = 1234567;
+
+unsigned prng() {
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    return (x * 2685821657736338717ull) & 0xFFFFFFFF;
 }
 
 SkipNode* find_node(uintptr_t data, SkipNode** prev) {
     SkipNode* pred = head;
     SkipNode* node = head;
-    for (int level = 0; level < 4; ++level) {
+    for (int level = 0; level < SKIPLIST_DEPTH; ++level) {
         node = pred->next[level];
         while (node != tail && data > node->data) {
             pred = node;
@@ -235,7 +225,7 @@ SkipNode* find_node(uintptr_t data, SkipNode** prev) {
 
 SkipNode* find_node_inner(uintptr_t data) {
     SkipNode* pred = head;
-    for (int level = 0; level < 4; ++level) {
+    for (int level = 0; level < SKIPLIST_DEPTH; ++level) {
         SkipNode* node = pred->next[level];
         while (node != tail && data >= node->data) {
             if (data < (node->data + (1L << node->size))) {
@@ -248,27 +238,28 @@ SkipNode* find_node_inner(uintptr_t data) {
 }
 
 void add_sparse_block(uintptr_t data, size_t size) {
-    SkipNode* prev[4];
+    SkipNode* prev[SKIPLIST_DEPTH];
     SkipNode* node = find_node(data, prev);
 
     SkipNode* new_node = new SkipNode();
     new_node->data = data;
     new_node->size = size;
 
-    int depth = next_depth();
-    for (int i = 0; i < depth; ++i) {
-        int level = 3 - i;
+    for (int level = SKIPLIST_DEPTH - 1; level >= 0; --level) {
         new_node->next[level] = prev[level]->next[level];
         prev[level]->next[level] = new_node;
+        if (level > 1 && (prng() & 3) != 0) {
+            break;
+        }
     }
 }
 
 bool remove_sparse_block(uintptr_t data) {
-    SkipNode* prev[4];
+    SkipNode* prev[SKIPLIST_DEPTH];
     SkipNode* node = find_node(data, prev);
 
     if (node->data == data) {
-        for (int i = 3; i >= 0 && prev[i]->next[i] == node; --i) {
+        for (int i = SKIPLIST_DEPTH - 1; i >= 0 && prev[i]->next[i] == node; --i) {
             prev[i]->next[i] = node->next[i];
         }
         add_free_block(reinterpret_cast<void*>(data), node->size);
@@ -331,9 +322,6 @@ void* BlockPool::AllocBlock(size_t bytes) {
         allocerr("returning null from alloc");
     }
 
-#ifndef NO_LOG_ALLOCS
-    fprintf(logfile, "alloc %zu -> %p\n", bytes, result);
-#endif
 #ifdef ALLOCATION_CHECK
     if (lookup_in_allocation_map(result)) {
         allocerr("reusing live allocation");
@@ -358,9 +346,6 @@ void* BlockPool::AllocLarge(unsigned log2) {
 }
 
 void BlockPool::FreeBlock(void* p) {
-#ifndef NO_LOG_ALLOCS
-    fprintf(logfile, "free %p\n", p);
-#endif
 #ifdef ALLOCATION_CHECK
     if (!Lookup(p)) {
         allocerr("can not free unknown/already-freed pointer");
@@ -552,7 +537,7 @@ void* lookup_in_allocation_map(void* tentative_pointer) {
 #endif
 
 static void print_sparse_table() {
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < SKIPLIST_DEPTH; ++i) {
         printf("level %d:", i);
         SkipNode* node = head->next[i];
         while (node != tail) {
