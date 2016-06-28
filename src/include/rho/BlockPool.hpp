@@ -28,8 +28,6 @@ class BlockPool {
         /** Visualize this block pool. */
         void DebugPrintPool();
 
-        static void DebugRebalance(int low_bits);
-
     private:
         /**
          * Used as an arena for allocating blocks. The Superblock members are
