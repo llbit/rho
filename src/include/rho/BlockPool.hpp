@@ -42,8 +42,8 @@ class BlockPool {
 
         struct FreeListEntry {
             FreeListEntry* next;
-            u32 block;
-            u32 superblock_index;
+            unsigned block;
+            Superblock* superblock;
         };
 
         size_t m_block_size; // Number of bytes per block.
@@ -63,7 +63,7 @@ class BlockPool {
         void* AllocSmall();
 
         /** Free a block in this block pool. */
-        void FreeSmall(void* p, unsigned superblock_id);
+        void FreeSmall(void* pointer, Superblock* superblock);
 
         /** Apply a function to all blocks in this pool. */
         void ApplyToPoolBlocks(std::function<void(void*)> f);
@@ -74,7 +74,7 @@ class BlockPool {
         Superblock* AddSuperblock();
 
         /** Tag a block as allocated. */
-        void* AllocateBlock(Superblock* superblock, int block);
+        void* AllocateBlock(Superblock* superblock, unsigned block);
 
         /** Tag a block as allocated. */
         static Superblock* SuperblockFromPointer(void* pointer);

@@ -64,10 +64,6 @@ struct FreeNode {
     FreeNode* next;
 };
 
-unsigned sparse_bits = 16;
-unsigned num_sparse_buckets = 1 << sparse_bits;
-unsigned hash_mask = num_sparse_buckets - 1;
-
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
 
@@ -565,7 +561,7 @@ void BlockPool::FreeBlock(void* p) {
 #endif
     Superblock* superblock = SuperblockFromPointer(p);
     if (superblock) {
-        superblock->pool->FreeSmall(p, superblock->index);
+        superblock->pool->FreeSmall(p, superblock);
     } else if (!remove_sparse_block(reinterpret_cast<uintptr_t>(p))) {
         allocerr("failed to free pointer - unallocated or double-free problem");
     }
@@ -573,13 +569,13 @@ void BlockPool::FreeBlock(void* p) {
 
 void* BlockPool::AllocSmall() {
     if (m_last_freed) {
-        u32 index = m_last_freed->block;
-        u32 superblock_index = m_last_freed->superblock_index;
+        unsigned index = m_last_freed->block;
+        Superblock* superblock = m_last_freed->superblock;
         m_last_freed = m_last_freed->next;
-        return AllocateBlock(m_superblocks[superblock_index], index);
+        return AllocateBlock(superblock, index);
     } else {
-        u32 index = m_next_untouched;
-        u32 superblock_index = m_next_superblock;
+        unsigned index = m_next_untouched;
+        unsigned superblock_index = m_next_superblock;
         if (index + 1 < m_superblock_size) {
             m_next_untouched += 1;
         } else {
@@ -597,19 +593,18 @@ void* BlockPool::AllocSmall() {
 }
 
 // Free a pointer inside a given superblock. The block MUST be in the given superblock.
-void BlockPool::FreeSmall(void* pointer, unsigned superblock_index) {
-    size_t block = reinterpret_cast<size_t>(pointer);
-    Superblock* superblock = m_superblocks[superblock_index];
-    size_t superblock_start = reinterpret_cast<size_t>(superblock) + SB_HEADER_SIZE;
-    size_t index = (block - superblock_start) / m_block_size;
-    size_t bitset = index / 64;
+void BlockPool::FreeSmall(void* pointer, Superblock* superblock) {
+    uintptr_t block = reinterpret_cast<uintptr_t>(pointer);
+    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
+    unsigned index = (block - superblock_start) / m_block_size;
+    unsigned bitset = index / 64;
     superblock->free[bitset] |= 1ull << (index & 63);
 
     // Use the block as a free list node and prepend to the free list.
     FreeListEntry* node = reinterpret_cast<FreeListEntry*>(pointer);
     node->next = m_last_freed;
     node->block = index;
-    node->superblock_index = superblock_index;
+    node->superblock = superblock;
     m_last_freed = node;
 }
 
@@ -632,8 +627,8 @@ BlockPool::Superblock* BlockPool::AddSuperblock() {
 }
 
 // Tag a block as allocated.
-void* BlockPool::AllocateBlock(Superblock* superblock, int block) {
-    int bitset = block / 64;
+void* BlockPool::AllocateBlock(Superblock* superblock, unsigned block) {
+    unsigned bitset = block / 64;
     superblock->free[bitset] &= ~(1ull << (block & 63));
     return reinterpret_cast<char*>(superblock)
         + SB_HEADER_SIZE + block * m_block_size;
