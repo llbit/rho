@@ -68,11 +68,6 @@ unsigned sparse_bits = 16;
 unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
-// The low pointer bits are masked out in the hash function.
-#define LOW_BITS (8)
-#define MAX_COLLISIONS (6)
-#define MAX_REBALANCE_COLLISIONS (3)
-
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
 
@@ -119,6 +114,7 @@ inline int first_free(u64 bitset) {
 #endif
 }
 
+// Find next power of two greater than or equal to the input size.
 static unsigned next_log2_32(int size) {
     if (size == 0) {
         return 0;
