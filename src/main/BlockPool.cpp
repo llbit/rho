@@ -34,16 +34,31 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
-#define SKIPLIST_DEPTH (6)
+#define RED (1)
+#define BLACK (0)
 
-struct SkipNode {
-    SkipNode* next[SKIPLIST_DEPTH];
+// Red-black tree node. Null pointer represents a black leaf node.
+struct TreeNode {
+    TreeNode* parent;
+    TreeNode* left;
+    TreeNode* right;
     uintptr_t data;
     unsigned size;
+    unsigned color;
 };
 
-SkipNode* head = nullptr;
-SkipNode* tail = nullptr;
+TreeNode* root = nullptr;
+
+TreeNode* new_tree_node(uintptr_t data, unsigned size) {
+    TreeNode* node = new TreeNode();
+    node->data = data;
+    node->size = size;
+    node->left = nullptr;
+    node->right = nullptr;
+    node->parent = nullptr;
+    node->color = RED;
+    return node;
+}
 
 struct FreeNode {
     FreeNode* next;
@@ -187,17 +202,6 @@ void BlockPool::Initialize() {
     for (int i = 0; i < 64; ++i) {
         free_set[i] = nullptr;
     }
-
-    tail = new SkipNode();
-    tail->data = UINTPTR_MAX;
-    tail->size = 0;
-    head = new SkipNode();
-    head->data = 0;
-    head->size = 0;
-    for (int i = 0; i < SKIPLIST_DEPTH; ++i) {
-        tail->next[i] = nullptr;
-        head->next[i] = tail;
-    }
 }
 
 u64 x = 1234567;
@@ -209,62 +213,273 @@ unsigned prng() {
     return (x * 2685821657736338717ull) & 0xFFFFFFFF;
 }
 
-SkipNode* find_node(uintptr_t data, SkipNode** prev) {
-    SkipNode* pred = head;
-    SkipNode* node = head;
-    for (int level = 0; level < SKIPLIST_DEPTH; ++level) {
-        node = pred->next[level];
-        while (node != tail && data > node->data) {
-            pred = node;
-            node = node->next[level];
-        }
-        prev[level] = pred;
-    }
-    return node;
-}
-
-SkipNode* find_node_inner(uintptr_t data) {
-    SkipNode* pred = head;
-    for (int level = 0; level < SKIPLIST_DEPTH; ++level) {
-        SkipNode* node = pred->next[level];
-        while (node != tail && data >= node->data) {
-            if (data < (node->data + (1L << node->size))) {
-                return node;
-            }
-            node = node->next[level];
+TreeNode* search_tree(uintptr_t data) {
+    TreeNode* node = root;
+    while (node) {
+        if (node->data <= data && (node->data + (1L << node->size)) > data) {
+            return node;
+        } else if (data < node->data) {
+            node = node->left;
+        } else {
+            node = node->right;
         }
     }
     return nullptr;
 }
 
-void add_sparse_block(uintptr_t data, size_t size) {
-    SkipNode* prev[SKIPLIST_DEPTH];
-    SkipNode* node = find_node(data, prev);
+void left_rotate(TreeNode* x) {
+    TreeNode* y = x->right;
+    if (y == nullptr) {
+        return;
+    }
+    y->parent = x->parent;
+    if (x->parent) {
+        if (x->parent->left == x) {
+            x->parent->left = y;
+        } else {
+            x->parent->right = y;
+        }
+    } else {
+        root = y;
+    }
+    if (y->left) {
+        y->left->parent = x;
+    }
+    x->right = y->left;
+    y->left = x;
+    x->parent = y;
+}
 
-    SkipNode* new_node = new SkipNode();
-    new_node->data = data;
-    new_node->size = size;
+void right_rotate(TreeNode* y) {
+    TreeNode* x = y->left;
+    if (x == nullptr) {
+        return;
+    }
+    x->parent = y->parent;
+    if (y->parent != nullptr) {
+        if (y->parent->left == y) {
+            y->parent->left = x;
+        } else {
+            y->parent->right = x;
+        }
+    } else {
+        root = x;
+    }
+    if (x->right != nullptr) {
+        x->right->parent = y;
+    }
+    y->left = x->right;
+    x->right = y;
+    y->parent = x;
+}
 
-    for (int level = SKIPLIST_DEPTH - 1; level >= 0; --level) {
-        new_node->next[level] = prev[level]->next[level];
-        prev[level]->next[level] = new_node;
-        if (level > 1 && (prng() & 1) == 0) {
+void insert_fixup(TreeNode* p) {
+    while (p->parent != nullptr && p->parent->color == RED) {
+	TreeNode* pp = p->parent;
+	TreeNode* gp = pp->parent;
+	TreeNode* y;
+        if (gp == nullptr) {
             break;
+        }
+	if (pp == gp->left) {
+	    y = gp->right;
+	    if (y && y->color == RED) {
+		// Case 1
+		pp->color = BLACK;
+		y->color = BLACK;
+		gp->color = RED;
+		p = gp;
+	    } else {
+		if (pp->right == p) {
+		    // Case 2
+		    left_rotate(pp);
+		    p = pp;
+		    pp = p->parent;
+		}
+		pp->color = BLACK;
+		gp->color = RED;
+		right_rotate(gp);
+	    }
+	} else {
+	    y = gp->left;
+	    if (y && y->color == RED) {
+		// Case 1
+		pp->color = BLACK;
+		y->color = BLACK;
+		gp->color = RED;
+		p = gp;
+	    } else {
+		if (pp->left == p) {
+		    // Case 2
+		    right_rotate(pp);
+		    p = pp;
+		    pp = p->parent;
+		}
+		pp->color = BLACK;
+		gp->color = RED;
+		left_rotate(gp);
+	    }
+	}
+    }
+}
+
+void add_sparse_block(uintptr_t data, size_t size) {
+
+    if (!root) {
+        root = new_tree_node(data, size);
+        root->color = BLACK;
+        return;
+    }
+
+    TreeNode* node = root;
+    while (true) {
+        if (data < node->data) {
+            if (node->left) {
+                node = node->left;
+            } else {
+                node->left = new_tree_node(data, size);
+                node->left->parent = node;
+                insert_fixup(node->left);
+                return;
+            }
+        } else {
+            if (node->right) {
+                node = node->right;
+            } else {
+                node->right = new_tree_node(data, size);
+                node->right->parent = node;
+                insert_fixup(node->right);
+                return;
+            }
         }
     }
 }
 
-bool remove_sparse_block(uintptr_t data) {
-    SkipNode* prev[SKIPLIST_DEPTH];
-    SkipNode* node = find_node(data, prev);
-
-    if (node->data == data) {
-        for (int i = SKIPLIST_DEPTH - 1; i >= 0 && prev[i]->next[i] == node; --i) {
-            prev[i]->next[i] = node->next[i];
+void delete_fixup(TreeNode* x, TreeNode* pp) {
+    while (x != root && (x == nullptr || x->color == BLACK)) {
+        if (x == pp->left) {
+            TreeNode* w = pp->right;
+            if (w != nullptr && w->color == RED) {
+                w->color = BLACK;
+                pp->color = RED;
+                left_rotate(pp);
+                w = pp->right;
+            }
+            if ((w->left == nullptr || w->left->color == BLACK)
+                    && (w->right == nullptr || w->right->color == BLACK)) {
+                w->color = RED;
+                x = pp;
+            } else {
+                if (w->right == nullptr || w->right->color == BLACK) {
+                    w->color = RED;
+                    right_rotate(w);
+                    w = pp->right;
+                }
+                w->color = pp->color;
+                pp->color = BLACK;
+                w->right->color = BLACK;
+                left_rotate(pp);
+                x = root;
+            }
+        } else {
+            TreeNode* w = pp->left;
+            if (w->color == RED) {
+                w->color = BLACK;
+                pp->color = RED;
+                right_rotate(pp);
+                w = pp->left;
+            }
+            if ((w->left == nullptr || w->left->color == BLACK)
+                    && (w->right == nullptr || w->right->color == BLACK)) {
+                w->color = RED;
+                x = pp;
+            } else {
+                if (w->left == nullptr || w->left->color == BLACK) {
+                    w->color = RED;
+                    left_rotate(w);
+                    w = pp->left;
+                }
+                w->color = pp->color;
+                pp->color = BLACK;
+                w->left->color = BLACK;
+                right_rotate(pp);
+                x = root;
+            }
         }
-        add_free_block(reinterpret_cast<void*>(data), node->size);
-        delete node;
-        return true;
+        pp = x->parent;
+    }
+    if (x) {
+        x->color = BLACK;
+    }
+}
+
+TreeNode* minimum(TreeNode* x) {
+    while (x->left != nullptr) {
+        x = x->left;
+    }
+    return x;
+}
+
+TreeNode* successor(TreeNode* x) {
+    if (x->right != nullptr) {
+        return minimum(x->right);
+    }
+    TreeNode* y = x->parent;
+    while (y != nullptr && x == y->right) {
+        x = y;
+        y = y->parent;
+    }
+    return y;
+}
+
+void delete_rb_node(TreeNode* p) {
+    TreeNode* y;
+    TreeNode* x;
+    if (p->left == nullptr || p->right == nullptr) {
+        y = p;
+    } else {
+        y = successor(p);
+    }
+    if (y->left != nullptr) {
+        x = y->left;
+    } else {
+        x = y->right;
+    }
+    TreeNode* parentx = y->parent;
+    if (x != nullptr) {
+        x->parent = y->parent;
+    }
+    if (y->parent == nullptr) {
+        root = x;
+    } else {
+        if (y == y->parent->left) {
+            y->parent->left = x;
+        } else {
+            y->parent->right = x;
+        }
+    }
+    if (y != p) {
+        p->data = y->data;
+        p->size = y->size;
+    }
+    if (y->color == BLACK) {
+        delete_fixup(x, parentx);
+    }
+    delete y;
+}
+
+bool remove_sparse_block(uintptr_t data) {
+    TreeNode* node = root;
+    while (node) {
+        if (node->data == data) {
+            add_free_block(reinterpret_cast<void*>(data), node->size);
+            delete_rb_node(node);
+            return true;
+        } else if (data < node->data) {
+            node = node->left;
+        } else {
+            node = node->right;
+        }
     }
     return false;
 }
@@ -453,6 +668,14 @@ void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun) {
     }
 }
 
+void apply_to_tree(TreeNode* node, std::function<void(void*)> fun) {
+    if (node) {
+        fun(reinterpret_cast<void*>(node->data));
+        apply_to_tree(node->left, fun);
+        apply_to_tree(node->right, fun);
+    }
+}
+
 void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
 #ifdef ALLOCATION_CHECK
     iterating = true;
@@ -462,11 +685,7 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             pool->ApplyToPoolBlocks(fun);
         }
     }
-    SkipNode* node = head->next[3];
-    while (node != tail) {
-        fun(reinterpret_cast<void*>(node->data));
-        node = node->next[3];
-    }
+    apply_to_tree(root, fun);
 #ifdef ALLOCATION_CHECK
     iterating = false;
 #endif
@@ -491,7 +710,7 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-        SkipNode* node = find_node_inner(candidate_uint);
+        TreeNode* node = search_tree(candidate_uint);
         if (node) {
             result = reinterpret_cast<void*>(node->data);
         }
@@ -536,16 +755,23 @@ void* lookup_in_allocation_map(void* tentative_pointer) {
 }
 #endif
 
-static void print_sparse_table() {
-    for (int i = 0; i < SKIPLIST_DEPTH; ++i) {
-        printf("level %d:", i);
-        SkipNode* node = head->next[i];
-        while (node != tail) {
-            printf(" -> %p", reinterpret_cast<void*>(node->data));
-            node = node->next[i];
+static void tree_print(TreeNode* node, int indent) {
+    printf("%*c", indent, ' ');
+    if (node) {
+        if (node->color == RED) {
+            printf("red: %p\n", reinterpret_cast<void*>(node->data));
+        } else {
+            printf("blk: %p\n", reinterpret_cast<void*>(node->data));
         }
-        printf("\n");
+        tree_print(node->left, indent + 2);
+        tree_print(node->right, indent + 2);
+    } else {
+        printf("nil\n");
     }
+}
+
+static void rb_tree_print() {
+    tree_print(root, 0);
 }
 
 void BlockPool::DebugPrint() {
@@ -554,7 +780,7 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
-    print_sparse_table();
+    rb_tree_print();
 }
 
 void BlockPool::DebugPrintPool() {
