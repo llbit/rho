@@ -69,25 +69,7 @@ struct FreeNode {
 
 static BlockPool* pools[NUM_POOLS];
 
-static unsigned hash_ptr(uintptr_t ptr, unsigned hash_mask) {
-    unsigned low = (ptr << 4) & 0xFFFFFFFF;
-    unsigned hi = (ptr >> 32) & 0xFFFFFFFF;
-    unsigned hash = low ^ hi;
-    low = hash & 0xFFFF;
-    hi = (hash >> 16) & 0xFFFF;
-    hash = low ^ hi ^ (ptr & (~0xFFFF));
-    return hash & hash_mask;
-}
-
-static unsigned probe_func(unsigned hash, int i, unsigned hash_mask) {
-    return (hash + i + 1) & hash_mask;
-}
-
 FreeNode* free_set[64];
-
-unsigned add_collision = 0;
-unsigned remove_collision = 0;
-unsigned lookup_collision = 0;
 
 inline int first_free(u64 bitset) {
     if (bitset == 0) {
