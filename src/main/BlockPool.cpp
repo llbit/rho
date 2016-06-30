@@ -745,6 +745,19 @@ void BlockPool::DebugPrint() {
         }
     }
     rb_tree_print();
+
+    printf("#### FREE SET\n");
+    for (int i = 7; i < 64; ++i) {
+        unsigned count = 0;
+        FreeNode* node = free_set[i];
+        while (node) {
+            node = node->next;
+            count += 1;
+        }
+        if (count > 0) {
+            printf("%d: %d\n", i, count);
+        }
+    }
 }
 
 void BlockPool::DebugPrintPool() {
