@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#define USE_STD_MAP
+
 #ifdef ALLOCATION_CHECK
 typedef std::map<void*, void*> allocation_map;
 static allocation_map allocations;
@@ -291,7 +293,7 @@ void insert_fixup(TreeNode* p) {
 }
 
 void add_sparse_block(uintptr_t data, unsigned size) {
-#if USE_STD_MAP
+#ifdef USE_STD_MAP
     sparse_allocs[data] = size;
 #else
     if (!root) {
@@ -439,9 +441,9 @@ void delete_rb_node(TreeNode* p) {
 }
 
 bool remove_sparse_block(uintptr_t data) {
-#if USE_STD_MAP
+#ifdef USE_STD_MAP
     std::map<uintptr_t, unsigned>::const_iterator next_allocation =
-        sparse_allocs.upper_bound(candidate_uint);
+        sparse_allocs.upper_bound(data);
     if (next_allocation != sparse_allocs.begin()) {
         auto allocation = std::prev(next_allocation);
         add_free_block(allocation->first, allocation->second);
@@ -691,7 +693,7 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-#if USE_STD_MAP
+#ifdef USE_STD_MAP
         std::map<uintptr_t, unsigned>::const_iterator next_allocation =
             sparse_allocs.upper_bound(candidate_uint);
         if (next_allocation != sparse_allocs.begin()) {
