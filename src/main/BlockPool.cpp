@@ -47,6 +47,8 @@ struct TreeNode {
     unsigned color;
 };
 
+static std::map<uintptr_t, unsigned> sparse_allocs;
+
 TreeNode* root = nullptr;
 
 TreeNode* new_tree_node(uintptr_t data, unsigned size) {
@@ -134,7 +136,7 @@ static unsigned next_log2_32(int size) {
 // leaves some unused bitset entries for larger block sizes.
 #define SB_HEADER_SIZE (1040)
 
-void add_free_block(void* data, unsigned size);
+void add_free_block(uintptr_t data, unsigned size);
 
 void* megaarena = nullptr;
 uintptr_t sbstart;
@@ -288,8 +290,10 @@ void insert_fixup(TreeNode* p) {
     }
 }
 
-void add_sparse_block(uintptr_t data, size_t size) {
-
+void add_sparse_block(uintptr_t data, unsigned size) {
+#if USE_STD_MAP
+    sparse_allocs[data] = size;
+#else
     if (!root) {
         root = new_tree_node(data, size);
         root->color = BLACK;
@@ -318,6 +322,7 @@ void add_sparse_block(uintptr_t data, size_t size) {
             }
         }
     }
+#endif
 }
 
 void delete_fixup(TreeNode* x, TreeNode* pp) {
@@ -434,10 +439,21 @@ void delete_rb_node(TreeNode* p) {
 }
 
 bool remove_sparse_block(uintptr_t data) {
+#if USE_STD_MAP
+    std::map<uintptr_t, unsigned>::const_iterator next_allocation =
+        sparse_allocs.upper_bound(candidate_uint);
+    if (next_allocation != sparse_allocs.begin()) {
+        auto allocation = std::prev(next_allocation);
+        add_free_block(allocation->first, allocation->second);
+        sparse_allocs.erase(allocation);
+        return true;
+    }
+    return false;
+#else
     TreeNode* node = root;
     while (node) {
         if (node->data == data) {
-            add_free_block(reinterpret_cast<void*>(data), node->size);
+            add_free_block(data, node->size);
             delete_rb_node(node);
             return true;
         } else if (data < node->data) {
@@ -447,9 +463,10 @@ bool remove_sparse_block(uintptr_t data) {
         }
     }
     return false;
+#endif
 }
 
-void add_free_block(void* data, unsigned log2) {
+void add_free_block(uintptr_t data, unsigned log2) {
     FreeNode* new_node = reinterpret_cast<FreeNode*>(data);
     new_node->next = free_set[log2];
     free_set[log2] = new_node;
@@ -674,10 +691,24 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
+#if USE_STD_MAP
+        std::map<uintptr_t, unsigned>::const_iterator next_allocation =
+            sparse_allocs.upper_bound(candidate_uint);
+        if (next_allocation != sparse_allocs.begin()) {
+            auto allocation = std::prev(next_allocation);
+
+            // Check that tentative_pointer is before the end of the allocation.
+            unsigned size = allocation->second;
+            if (candidate_uint < (allocation->first + (1L << size))) { // Less-than-or-equal handles one-past-end pointers.
+                result = reinterpret_cast<void*>(allocation->first);
+            }
+        }
+#else
         TreeNode* node = search_tree(candidate_uint);
         if (node) {
             result = reinterpret_cast<void*>(node->data);
         }
+#endif
     }
 #ifdef ALLOCATION_CHECK
     if (result != lookup_in_allocation_map(candidate)) {
@@ -744,7 +775,10 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
+
+#ifndef USE_STD_MAP
     rb_tree_print();
+#endif
 
     printf("#### FREE SET\n");
     for (int i = 7; i < 64; ++i) {
