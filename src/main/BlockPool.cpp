@@ -668,7 +668,15 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             pool->ApplyToPoolBlocks(fun);
         }
     }
+#ifdef USE_STD_MAP
+    auto iter = sparse_allocs.begin();
+    while (iter != sparse_allocs.end()) {
+        fun(reinterpret_cast<void*>(iter->first));
+        ++iter;
+    }
+#else
     apply_to_tree(root, fun);
+#endif
 #ifdef ALLOCATION_CHECK
     iterating = false;
 #endif
@@ -771,17 +779,25 @@ static void rb_tree_print() {
     tree_print(root, 0);
 }
 
-void BlockPool::DebugPrint() {
-    for (auto pool : pools) {
-        if (pool) {
-            pool->DebugPrintPool();
+void print_sparse_set() {
+    unsigned count[64];
+    auto iter = sparse_allocs.begin();
+    for (int i = 0; i < 64; ++i) {
+        count[i] = 0;
+    }
+    while (iter != sparse_allocs.end()) {
+        count[iter->second] += 1;
+        ++iter;
+    }
+    printf("#### SPARSE SET\n");
+    for (int i = 7; i < 64; ++i) {
+        if (count[i] > 0) {
+            printf("%d: %d\n", i, count[i]);
         }
     }
+}
 
-#ifndef USE_STD_MAP
-    rb_tree_print();
-#endif
-
+void print_free_set() {
     printf("#### FREE SET\n");
     for (int i = 7; i < 64; ++i) {
         unsigned count = 0;
@@ -794,6 +810,21 @@ void BlockPool::DebugPrint() {
             printf("%d: %d\n", i, count);
         }
     }
+}
+
+void BlockPool::DebugPrint() {
+    for (auto pool : pools) {
+        if (pool) {
+            pool->DebugPrintPool();
+        }
+    }
+
+#ifndef USE_STD_MAP
+    rb_tree_print();
+#endif
+
+    print_sparse_set();
+    print_free_set();
 }
 
 void BlockPool::DebugPrintPool() {
