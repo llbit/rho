@@ -8,8 +8,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define USE_STD_MAP
-
+#define ALLOCATION_CHECK
 #ifdef ALLOCATION_CHECK
 typedef std::map<void*, void*> allocation_map;
 static allocation_map allocations;
@@ -36,44 +35,71 @@ using namespace std;
 void* heap_start = reinterpret_cast<void*>(UINTPTR_MAX);
 void* heap_end = reinterpret_cast<void*>(0);
 
-#define RED (1)
-#define BLACK (0)
-
-// Red-black tree node. Null pointer represents a black leaf node.
-struct TreeNode {
-    TreeNode* parent;
-    TreeNode* left;
-    TreeNode* right;
+// Hash bucket for the sparse block table and free lists.
+struct HashBucket {
     uintptr_t data;
     unsigned size;
-    unsigned color;
 };
-
-static std::map<uintptr_t, unsigned> sparse_allocs;
-
-TreeNode* root = nullptr;
-
-TreeNode* new_tree_node(uintptr_t data, unsigned size) {
-    TreeNode* node = new TreeNode();
-    node->data = data;
-    node->size = size;
-    node->left = nullptr;
-    node->right = nullptr;
-    node->parent = nullptr;
-    node->color = RED;
-    return node;
-}
 
 struct FreeNode {
     FreeNode* next;
 };
+
+struct SuperblockFreeNode {
+    SuperblockFreeNode* next;
+    unsigned block;
+    uintptr_t superblock;
+};
+
+
+struct BigSuperblock {
+    u32 block_size;
+    short size_log2;
+    short next_untouched;
+    SuperblockFreeNode* free_list;
+    u64 free[]; // Free bitset.
+};
+
+unsigned sparse_bits = 16;
+unsigned num_sparse_buckets = 1 << sparse_bits;
+unsigned hash_mask = num_sparse_buckets - 1;
+
+// The low pointer bits are masked out in the hash function.
+#define LOW_BITS (15)
+#define MAX_COLLISIONS (6)
+#define MAX_REBALANCE_COLLISIONS (3)
 
 // NUM_POOLS = 1 + (max block size / 8) = 1 + 256 / 8 = 33.
 #define NUM_POOLS (33)
 
 static BlockPool* pools[NUM_POOLS];
 
+static unsigned hash_ptr(uintptr_t ptr, unsigned hash_mask) {
+    unsigned low = (ptr << 4) & 0xFFFFFFFF;
+    unsigned hi = (ptr >> 32) & 0xFFFFFFFF;
+    unsigned hash = low ^ hi;
+    low = hash & 0xFFFF;
+    hi = (hash >> 16) & 0xFFFF;
+    hash = low ^ hi ^ (ptr & (~0xFFFF));
+    return hash & hash_mask;
+}
+
+static unsigned probe_func(unsigned hash, int i, unsigned hash_mask) {
+    return (hash + i + 1) & hash_mask;
+}
+
+HashBucket* sparse_buckets = nullptr;
 FreeNode* free_set[64];
+BigSuperblock* large_superblocks[18];
+
+uintptr_t deleted_bucket = UINTPTR_MAX;
+
+unsigned add_collision = 0;
+unsigned remove_collision = 0;
+unsigned lookup_collision = 0;
+
+// Allocate buckets in batches to get better cache locality when iterating over buckets.
+static HashBucket* alloc_sparse_bucket();
 
 inline int first_free(u64 bitset) {
     if (bitset == 0) {
@@ -88,7 +114,7 @@ inline int first_free(u64 bitset) {
     // This version can be replaced to improve the case where __builtin_ctzll
     // is not available.
     int log2 = 0;
-    while (!(bitset & 1ull)) {
+    while (!(bitset & u64{1})) {
         log2 += 1;
         bitset >>= 1;
     }
@@ -96,7 +122,6 @@ inline int first_free(u64 bitset) {
 #endif
 }
 
-// Find next power of two greater than or equal to the input size.
 static unsigned next_log2_32(int size) {
     if (size == 0) {
         return 0;
@@ -138,7 +163,9 @@ static unsigned next_log2_32(int size) {
 // leaves some unused bitset entries for larger block sizes.
 #define SB_HEADER_SIZE (1040)
 
-void add_free_block(uintptr_t data, unsigned size);
+// 1 Mbyte for medium block arenas.
+#define MEDIUM_ARENA_SIZE_LOG2 (19)
+#define MEDIUM_ARENA_SIZE (1 << MEDIUM_ARENA_SIZE_LOG2)
 
 void* megaarena = nullptr;
 uintptr_t sbstart;
@@ -180,304 +207,163 @@ void BlockPool::Initialize() {
     for (int i = 0; i < 64; ++i) {
         free_set[i] = nullptr;
     }
-}
 
-TreeNode* search_tree(uintptr_t data) {
-    TreeNode* node = root;
-    while (node) {
-        if (node->data <= data && (node->data + (1L << node->size)) > data) {
-            return node;
-        } else if (data < node->data) {
-            node = node->left;
-        } else {
-            node = node->right;
-        }
+    for (int i = 0; i < 18; ++i) {
+        large_superblocks[i] = nullptr;
     }
-    return nullptr;
-}
 
-void left_rotate(TreeNode* x) {
-    TreeNode* y = x->right;
-    if (y == nullptr) {
-        return;
-    }
-    y->parent = x->parent;
-    if (x->parent) {
-        if (x->parent->left == x) {
-            x->parent->left = y;
-        } else {
-            x->parent->right = y;
-        }
-    } else {
-        root = y;
-    }
-    if (y->left) {
-        y->left->parent = x;
-    }
-    x->right = y->left;
-    y->left = x;
-    x->parent = y;
-}
-
-void right_rotate(TreeNode* y) {
-    TreeNode* x = y->left;
-    if (x == nullptr) {
-        return;
-    }
-    x->parent = y->parent;
-    if (y->parent != nullptr) {
-        if (y->parent->left == y) {
-            y->parent->left = x;
-        } else {
-            y->parent->right = x;
-        }
-    } else {
-        root = x;
-    }
-    if (x->right != nullptr) {
-        x->right->parent = y;
-    }
-    y->left = x->right;
-    x->right = y;
-    y->parent = x;
-}
-
-void insert_fixup(TreeNode* p) {
-    while (p->parent != nullptr && p->parent->color == RED) {
-	TreeNode* pp = p->parent;
-	TreeNode* gp = pp->parent;
-	TreeNode* y;
-        if (gp == nullptr) {
-            break;
-        }
-	if (pp == gp->left) {
-	    y = gp->right;
-	    if (y && y->color == RED) {
-		// Case 1
-		pp->color = BLACK;
-		y->color = BLACK;
-		gp->color = RED;
-		p = gp;
-	    } else {
-		if (pp->right == p) {
-		    // Case 2
-		    left_rotate(pp);
-		    p = pp;
-		    pp = p->parent;
-		}
-		pp->color = BLACK;
-		gp->color = RED;
-		right_rotate(gp);
-	    }
-	} else {
-	    y = gp->left;
-	    if (y && y->color == RED) {
-		// Case 1
-		pp->color = BLACK;
-		y->color = BLACK;
-		gp->color = RED;
-		p = gp;
-	    } else {
-		if (pp->left == p) {
-		    // Case 2
-		    right_rotate(pp);
-		    p = pp;
-		    pp = p->parent;
-		}
-		pp->color = BLACK;
-		gp->color = RED;
-		left_rotate(gp);
-	    }
-	}
+    sparse_buckets = new HashBucket[num_sparse_buckets];
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        sparse_buckets[i].data = 0;
     }
 }
 
-void add_sparse_block(uintptr_t data, unsigned size) {
-#ifdef USE_STD_MAP
-    sparse_allocs[data] = size;
-#else
-    if (!root) {
-        root = new_tree_node(data, size);
-        root->color = BLACK;
-        return;
+bool rebalance_sparse_table(unsigned new_sparse_bits) {
+    if (new_sparse_bits > 29) {
+        allocerr("sparse table is too large");
     }
-
-    TreeNode* node = root;
-    while (true) {
-        if (data < node->data) {
-            if (node->left) {
-                node = node->left;
-            } else {
-                node->left = new_tree_node(data, size);
-                node->left->parent = node;
-                insert_fixup(node->left);
-                return;
-            }
-        } else {
-            if (node->right) {
-                node = node->right;
-            } else {
-                node->right = new_tree_node(data, size);
-                node->right->parent = node;
-                insert_fixup(node->right);
-                return;
-            }
-        }
+    unsigned new_table_size = 1 << new_sparse_bits;
+    unsigned new_mask = new_table_size - 1;
+    HashBucket* new_table = new HashBucket[new_table_size];
+    for (int i = 0; i < new_table_size; ++i) {
+        new_table[i].data = 0;
     }
-#endif
-}
-
-void delete_fixup(TreeNode* x, TreeNode* pp) {
-    while (x != root && (x == nullptr || x->color == BLACK)) {
-        if (x == pp->left) {
-            TreeNode* w = pp->right;
-            if (w != nullptr && w->color == RED) {
-                w->color = BLACK;
-                pp->color = RED;
-                left_rotate(pp);
-                w = pp->right;
-            }
-            if ((w->left == nullptr || w->left->color == BLACK)
-                    && (w->right == nullptr || w->right->color == BLACK)) {
-                w->color = RED;
-                x = pp;
-            } else {
-                if (w->right == nullptr || w->right->color == BLACK) {
-                    w->color = RED;
-                    right_rotate(w);
-                    w = pp->right;
+    // Build new table.
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        HashBucket& bucket = sparse_buckets[i];
+        if (bucket.data != 0 && bucket.data != deleted_bucket) {
+            unsigned hash = hash_ptr(bucket.data >> LOW_BITS, new_mask);
+            bool placed = false;
+            for (int j = 0; j < MAX_REBALANCE_COLLISIONS; ++j) {
+                if (new_table[hash].data) {
+                    new_table[hash].data = bucket.data;
+                    new_table[hash].size = bucket.size;
+                    placed = true;
+                    break;
                 }
-                w->color = pp->color;
-                pp->color = BLACK;
-                w->right->color = BLACK;
-                left_rotate(pp);
-                x = root;
+                hash = probe_func(hash, j, new_mask);
             }
-        } else {
-            TreeNode* w = pp->left;
-            if (w->color == RED) {
-                w->color = BLACK;
-                pp->color = RED;
-                right_rotate(pp);
-                w = pp->left;
+            if (!placed) {
+                delete new_table;
+                return false;
             }
-            if ((w->left == nullptr || w->left->color == BLACK)
-                    && (w->right == nullptr || w->right->color == BLACK)) {
-                w->color = RED;
-                x = pp;
-            } else {
-                if (w->left == nullptr || w->left->color == BLACK) {
-                    w->color = RED;
-                    left_rotate(w);
-                    w = pp->left;
+        }
+    }
+    // Replace the old table.
+    delete sparse_buckets;
+    sparse_buckets = new_table;
+    sparse_bits = new_sparse_bits;
+    num_sparse_buckets = new_table_size;
+    hash_mask = new_mask;
+    return true;
+}
+
+void add_sparse_block(uintptr_t pointer, size_t size) {
+    uintptr_t key = pointer >> LOW_BITS;
+    uintptr_t key_end = (pointer + (1L << size) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
+    bool first = true;
+    do {
+        unsigned hash = hash_ptr(key, hash_mask);
+        bool added = false;
+        for (int i = 0; i < MAX_COLLISIONS; ++i) {
+            HashBucket& bucket = sparse_buckets[hash];
+            if (bucket.data == 0 || (bucket.data == deleted_bucket)) {
+                if (first) {
+                    // Tag this as the first hash entry.
+                    first = false;
+                    sparse_buckets[hash].data = pointer | 1;
+                } else {
+                    sparse_buckets[hash].data = pointer;
                 }
-                w->color = pp->color;
-                pp->color = BLACK;
-                w->left->color = BLACK;
-                right_rotate(pp);
-                x = root;
+                sparse_buckets[hash].size = size;
+                added = true;
+                break;
             }
+            add_collision += 1;
+            hash = probe_func(hash, i, hash_mask);
         }
-        pp = x->parent;
-    }
-    if (x) {
-        x->color = BLACK;
-    }
+        if (!added) {
+            // Too many collisions, rebalance the hash table.
+            unsigned new_sparse_bits = sparse_bits;
+            do {
+                new_sparse_bits += 1;
+            } while (!rebalance_sparse_table(new_sparse_bits));
+        }
+        key += 1;
+    } while (key < key_end);
 }
 
-TreeNode* minimum(TreeNode* x) {
-    while (x->left != nullptr) {
-        x = x->left;
-    }
-    return x;
-}
+void add_free_block(uintptr_t data, unsigned size);
 
-TreeNode* successor(TreeNode* x) {
-    if (x->right != nullptr) {
-        return minimum(x->right);
-    }
-    TreeNode* y = x->parent;
-    while (y != nullptr && x == y->right) {
-        x = y;
-        y = y->parent;
-    }
-    return y;
-}
-
-void delete_rb_node(TreeNode* p) {
-    TreeNode* y;
-    TreeNode* x;
-    if (p->left == nullptr || p->right == nullptr) {
-        y = p;
-    } else {
-        y = successor(p);
-    }
-    if (y->left != nullptr) {
-        x = y->left;
-    } else {
-        x = y->right;
-    }
-    TreeNode* parentx = y->parent;
-    if (x != nullptr) {
-        x->parent = y->parent;
-    }
-    if (y->parent == nullptr) {
-        root = x;
-    } else {
-        if (y == y->parent->left) {
-            y->parent->left = x;
+bool remove_sparse_block(uintptr_t pointer) {
+    uintptr_t key = pointer >> LOW_BITS;
+    unsigned hash = hash_ptr(key, hash_mask);
+    unsigned size = 0;
+    HashBucket* bucket = nullptr;
+    for (int i = 0; i < MAX_COLLISIONS; ++i) {
+        bucket = &sparse_buckets[hash];
+        if (bucket->data != 0) {
+            uintptr_t data = bucket->data & ~u64{3};
+            uintptr_t first_block = data + SB_HEADER_SIZE;
+            if ((bucket->data & 2) && first_block <= pointer && data + MEDIUM_ARENA_SIZE > pointer) {
+                BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(data);
+                unsigned index = (pointer - first_block) / superblock->block_size;
+                unsigned bitset = index / 64;
+                superblock->free[bitset] |= u64{1} << (index & 63);
+                SuperblockFreeNode* node = reinterpret_cast<SuperblockFreeNode*>(pointer);
+                node->block = index;
+                node->superblock = reinterpret_cast<uintptr_t>(superblock);
+                if (large_superblocks[superblock->size_log2]) {
+                    superblock = large_superblocks[superblock->size_log2];
+                }
+                node->next = superblock->free_list;
+                superblock->free_list = node;
+                return true;
+            } else if (data == pointer) {
+                bucket->data = deleted_bucket;
+                size = bucket->size;
+                add_free_block(pointer, bucket->size);
+                break;
+            }
         } else {
-            y->parent->right = x;
+            // Free failed.
+            return false;
         }
+        remove_collision += 1;
+        hash = probe_func(hash, i, hash_mask);
     }
-    if (y != p) {
-        p->data = y->data;
-        p->size = y->size;
-    }
-    if (y->color == BLACK) {
-        delete_fixup(x, parentx);
-    }
-    delete y;
-}
-
-bool remove_sparse_block(uintptr_t data) {
-#ifdef USE_STD_MAP
-    std::map<uintptr_t, unsigned>::const_iterator next_allocation =
-        sparse_allocs.upper_bound(data);
-    if (next_allocation != sparse_allocs.begin()) {
-        auto allocation = std::prev(next_allocation);
-        add_free_block(allocation->first, allocation->second);
-        sparse_allocs.erase(allocation);
-        return true;
-    }
-    return false;
-#else
-    TreeNode* node = root;
-    while (node) {
-        if (node->data == data) {
-            add_free_block(data, node->size);
-            delete_rb_node(node);
-            return true;
-        } else if (data < node->data) {
-            node = node->left;
-        } else {
-            node = node->right;
+    key += 1;
+    uintptr_t key_end = (pointer + (1L << size) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
+    while (key < key_end) {
+        unsigned hash = hash_ptr(key, hash_mask);
+        for (int i = 0; i < MAX_COLLISIONS; ++i) {
+            HashBucket& bucket = sparse_buckets[hash];
+            if (bucket.data == pointer) {
+                bucket.data = deleted_bucket;
+                break;
+            }
+            if (!bucket.data) {
+                // Free failed.
+                return false;
+            }
+            remove_collision += 1;
+            hash = probe_func(hash, i, hash_mask);
         }
+        key += 1;
     }
-    return false;
-#endif
+    return true;
 }
 
-void add_free_block(uintptr_t data, unsigned log2) {
-    FreeNode* new_node = reinterpret_cast<FreeNode*>(data);
-    new_node->next = free_set[log2];
-    free_set[log2] = new_node;
+void add_free_block(uintptr_t data, unsigned size_log2) {
+    FreeNode* new_node = reinterpret_cast<FreeNode*>(reinterpret_cast<void*>(data));
+    new_node->next = free_set[size_log2];
+    free_set[size_log2] = new_node;
 }
 
-void* remove_free_block(unsigned log2) {
-    FreeNode* node = reinterpret_cast<FreeNode*>(free_set[log2]);
+void* remove_free_block(unsigned size_log2) {
+    FreeNode* node = reinterpret_cast<FreeNode*>(free_set[size_log2]);
     if (node) {
-        free_set[log2] = node->next;
+        free_set[size_log2] = node->next;
     }
     return static_cast<void*>(node);
 }
@@ -495,13 +381,7 @@ static void update_heap_bounds(void* allocation, size_t size) {
 void* BlockPool::AllocBlock(size_t bytes) {
     void* result;
     unsigned block_bytes;
-    if (bytes > 256) {
-        // Default to separate allocation if block size is larger than page size.
-        unsigned log2 = next_log2_32(bytes);
-        block_bytes = 1 << log2;
-        result = AllocLarge(log2);
-        update_heap_bounds(result, block_bytes);
-    } else {
+    if (bytes <= 256) {
         int pool_index = (bytes + 7) / 8;
         if (pool_index < 4) {
             // Ensure at least 32-byte blocks. This is required both to to fit a
@@ -516,6 +396,12 @@ void* BlockPool::AllocBlock(size_t bytes) {
             pools[pool_index] = pool;
         }
         result = pool->AllocSmall();
+    } else {
+        // Default to separate allocation if block size is larger than small block threshold.
+        unsigned log2 = next_log2_32(bytes);
+        block_bytes = 1 << log2;
+        result = AllocLarge(log2);
+        update_heap_bounds(result, block_bytes);
     }
     if (!result) {
         allocerr("returning null from alloc");
@@ -538,8 +424,51 @@ void* BlockPool::AllocLarge(unsigned log2) {
     if (result) {
         add_sparse_block(reinterpret_cast<uintptr_t>(result), log2);
     } else {
-        result = new double[1 << log2];
-        add_sparse_block(reinterpret_cast<uintptr_t>(result), log2);
+        if (log2 <= 17) {
+            unsigned block_size = 1 << log2;
+            unsigned num_blocks = (MEDIUM_ARENA_SIZE - SB_HEADER_SIZE) >> log2;
+            BigSuperblock* superblock;
+            if (large_superblocks[log2]) {
+                // Reuse existing superblock for this allocation size.
+                superblock = large_superblocks[log2];
+            } else {
+                // Allocate a midsize superblock.
+                void* arena = new double[MEDIUM_ARENA_SIZE];
+                superblock = reinterpret_cast<BigSuperblock*>(arena);
+                superblock->block_size = 1 << log2;
+                superblock->size_log2 = log2;
+                superblock->free_list = nullptr;
+                superblock->next_untouched = 0;
+                int bitset_entries = ((1 << (MEDIUM_ARENA_SIZE_LOG2 - log2)) + 63) / 64;
+                for (int i = 0; i < bitset_entries; ++i) {
+                    superblock->free[i] = ~0ull;
+                }
+                add_sparse_block(reinterpret_cast<uintptr_t>(arena) | 2, MEDIUM_ARENA_SIZE_LOG2);
+                large_superblocks[log2] = superblock;
+            }
+            if (superblock->free_list) {
+                SuperblockFreeNode* free_node = superblock->free_list;
+                BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(free_node->superblock);
+                unsigned block = free_node->block;
+                unsigned bitset = block / 64;
+                superblock->free[bitset] &= ~(u64{1} << (block & 63));
+                superblock->free_list = free_node->next;
+                result = free_node;
+            } else {
+                unsigned block = superblock->next_untouched;
+                unsigned bitset = block / 64;
+                superblock->free[bitset] &= ~(u64{1} << (block & 63));
+                result = reinterpret_cast<char*>(superblock)
+                    + SB_HEADER_SIZE + block * block_size;
+                superblock->next_untouched += 1;
+                if (superblock->next_untouched == num_blocks) {
+                    large_superblocks[log2] = nullptr;
+                }
+            }
+        } else {
+            result = new double[1L << log2];
+            add_sparse_block(reinterpret_cast<uintptr_t>(result), log2);
+        }
     }
     return result;
 }
@@ -553,7 +482,7 @@ void BlockPool::FreeBlock(void* p) {
 #endif
     Superblock* superblock = SuperblockFromPointer(p);
     if (superblock) {
-        superblock->pool->FreeSmall(p, superblock);
+        superblock->pool->FreeSmall(p, superblock->index);
     } else if (!remove_sparse_block(reinterpret_cast<uintptr_t>(p))) {
         allocerr("failed to free pointer - unallocated or double-free problem");
     }
@@ -561,13 +490,13 @@ void BlockPool::FreeBlock(void* p) {
 
 void* BlockPool::AllocSmall() {
     if (m_last_freed) {
-        unsigned index = m_last_freed->block;
-        Superblock* superblock = m_last_freed->superblock;
+        u32 index = m_last_freed->block;
+        u32 superblock_index = m_last_freed->superblock_index;
         m_last_freed = m_last_freed->next;
-        return AllocateBlock(superblock, index);
+        return AllocateBlock(m_superblocks[superblock_index], index);
     } else {
-        unsigned index = m_next_untouched;
-        unsigned superblock_index = m_next_superblock;
+        u32 index = m_next_untouched;
+        u32 superblock_index = m_next_superblock;
         if (index + 1 < m_superblock_size) {
             m_next_untouched += 1;
         } else {
@@ -585,18 +514,19 @@ void* BlockPool::AllocSmall() {
 }
 
 // Free a pointer inside a given superblock. The block MUST be in the given superblock.
-void BlockPool::FreeSmall(void* pointer, Superblock* superblock) {
-    uintptr_t block = reinterpret_cast<uintptr_t>(pointer);
-    uintptr_t superblock_start = reinterpret_cast<uintptr_t>(superblock) + SB_HEADER_SIZE;
-    unsigned index = (block - superblock_start) / m_block_size;
-    unsigned bitset = index / 64;
-    superblock->free[bitset] |= 1ull << (index & 63);
+void BlockPool::FreeSmall(void* pointer, unsigned superblock_index) {
+    size_t block = reinterpret_cast<size_t>(pointer);
+    Superblock* superblock = m_superblocks[superblock_index];
+    size_t superblock_start = reinterpret_cast<size_t>(superblock) + SB_HEADER_SIZE;
+    size_t index = (block - superblock_start) / m_block_size;
+    size_t bitset = index / 64;
+    superblock->free[bitset] |= u64{1} << (index & 63);
 
     // Use the block as a free list node and prepend to the free list.
     FreeListEntry* node = reinterpret_cast<FreeListEntry*>(pointer);
     node->next = m_last_freed;
     node->block = index;
-    node->superblock = superblock;
+    node->superblock_index = superblock_index;
     m_last_freed = node;
 }
 
@@ -619,9 +549,9 @@ BlockPool::Superblock* BlockPool::AddSuperblock() {
 }
 
 // Tag a block as allocated.
-void* BlockPool::AllocateBlock(Superblock* superblock, unsigned block) {
-    unsigned bitset = block / 64;
-    superblock->free[bitset] &= ~(1ull << (block & 63));
+void* BlockPool::AllocateBlock(Superblock* superblock, int block) {
+    int bitset = block / 64;
+    superblock->free[bitset] &= ~(u64{1} << (block & 63));
     return reinterpret_cast<char*>(superblock)
         + SB_HEADER_SIZE + block * m_block_size;
 }
@@ -634,7 +564,7 @@ void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun) {
             u64 bitset = superblock->free[i];
             if (bitset != ~0ull) {
                 for (int index = 0; index < 64; ++index) {
-                    if (!(bitset & (1ull << index))) {
+                    if (!(bitset & (u64{1} << index))) {
 #ifdef ALLOCATION_CHECK
                         if (!lookup_in_allocation_map(reinterpret_cast<void*>(block))) {
                             allocerr("apply to all blocks iterating over non-alloc'd pointer");
@@ -651,14 +581,6 @@ void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun) {
     }
 }
 
-void apply_to_tree(TreeNode* node, std::function<void(void*)> fun) {
-    if (node) {
-        fun(reinterpret_cast<void*>(node->data));
-        apply_to_tree(node->left, fun);
-        apply_to_tree(node->right, fun);
-    }
-}
-
 void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
 #ifdef ALLOCATION_CHECK
     iterating = true;
@@ -668,15 +590,15 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
             pool->ApplyToPoolBlocks(fun);
         }
     }
-#ifdef USE_STD_MAP
-    auto iter = sparse_allocs.begin();
-    while (iter != sparse_allocs.end()) {
-        fun(reinterpret_cast<void*>(iter->first));
-        ++iter;
+    for (int i = 0; i < num_sparse_buckets; ++i) {
+        HashBucket& bucket = sparse_buckets[i];
+        if (bucket.data && bucket.data != deleted_bucket) {
+            uintptr_t pointer = reinterpret_cast<uintptr_t>(bucket.data);
+            if (pointer & 1) {
+                fun(reinterpret_cast<void*>(pointer & ~uintptr_t{1}));
+            }
+        }
     }
-#else
-    apply_to_tree(root, fun);
-#endif
 #ifdef ALLOCATION_CHECK
     iterating = false;
 #endif
@@ -694,31 +616,42 @@ void* BlockPool::Lookup(void* candidate) {
         }
         unsigned index = (candidate_uint - first_block) / superblock->block_size;
         unsigned bitset = index / 64;
-        if (!(superblock->free[bitset] & (1ull << (index & 63)))) {
+        if (!(superblock->free[bitset] & (u64{1} << (index & 63)))) {
             result = reinterpret_cast<char*>(first_block) + index * superblock->block_size;
         } else {
             // The block is not allocated.
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-#ifdef USE_STD_MAP
-        std::map<uintptr_t, unsigned>::const_iterator next_allocation =
-            sparse_allocs.upper_bound(candidate_uint);
-        if (next_allocation != sparse_allocs.begin()) {
-            auto allocation = std::prev(next_allocation);
-
-            // Check that tentative_pointer is before the end of the allocation.
-            unsigned size = allocation->second;
-            if (candidate_uint < (allocation->first + (1L << size))) { // Less-than-or-equal handles one-past-end pointers.
-                result = reinterpret_cast<void*>(allocation->first);
+        unsigned hash = hash_ptr(candidate_uint >> LOW_BITS, hash_mask);
+        for (int i = 0; i < MAX_COLLISIONS; ++i) {
+            HashBucket& bucket = sparse_buckets[hash];
+            if (bucket.data && bucket.data != deleted_bucket) {
+                uintptr_t pointer = bucket.data & ~uintptr_t{3};
+                if (bucket.data & uintptr_t{2}) {
+                    uintptr_t first_block = pointer + SB_HEADER_SIZE;
+                    if (first_block <= candidate_uint && pointer + MEDIUM_ARENA_SIZE > candidate_uint) {
+                        BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(pointer);
+                        unsigned index = (candidate_uint - first_block) / superblock->block_size;
+                        unsigned bitset = index / 64;
+                        if (!(superblock->free[bitset] & (u64{1} << (index & 63)))) {
+                            result = reinterpret_cast<char*>(first_block) + index * superblock->block_size;
+                        }
+                        break;
+                    }
+                } else if (pointer <= candidate_uint && (pointer + (1L << bucket.size)) > candidate_uint) {
+                    result = reinterpret_cast<void*>(pointer);
+                    break;
+                }
             }
+            if (!bucket.data) {
+                break;
+            }
+            lookup_collision += 1;
+            hash = probe_func(hash, i, hash_mask);
         }
-#else
-        TreeNode* node = search_tree(candidate_uint);
-        if (node) {
-            result = reinterpret_cast<void*>(node->data);
-        }
-#endif
+        // Block not found in separate allocation list.
+        //return nullptr;
     }
 #ifdef ALLOCATION_CHECK
     if (result != lookup_in_allocation_map(candidate)) {
@@ -760,56 +693,26 @@ void* lookup_in_allocation_map(void* tentative_pointer) {
 }
 #endif
 
-static void tree_print(TreeNode* node, int indent) {
-    printf("%*c", indent, ' ');
-    if (node) {
-        if (node->color == RED) {
-            printf("red: %p\n", reinterpret_cast<void*>(node->data));
+static void print_sparse_table() {
+    printf(">>>>> SPARSE TABLE\n");
+    int size = 0;
+    for (int i = 0; i < num_sparse_buckets; i += 16) {
+        int count = 0;
+        for (int j = 0; j < 16 && i + j < num_sparse_buckets; ++j) {
+            HashBucket& bucket = sparse_buckets[i + j];
+            if (bucket.data && bucket.data != deleted_bucket) {
+                count += 1;
+            }
+        }
+        if (count) {
+            printf("%X", count);
         } else {
-            printf("blk: %p\n", reinterpret_cast<void*>(node->data));
+            printf(".");
         }
-        tree_print(node->left, indent + 2);
-        tree_print(node->right, indent + 2);
-    } else {
-        printf("nil\n");
+        size += count;
     }
-}
-
-static void rb_tree_print() {
-    tree_print(root, 0);
-}
-
-void print_sparse_set() {
-    unsigned count[64];
-    auto iter = sparse_allocs.begin();
-    for (int i = 0; i < 64; ++i) {
-        count[i] = 0;
-    }
-    while (iter != sparse_allocs.end()) {
-        count[iter->second] += 1;
-        ++iter;
-    }
-    printf("#### SPARSE SET\n");
-    for (int i = 7; i < 64; ++i) {
-        if (count[i] > 0) {
-            printf("%d: %d\n", i, count[i]);
-        }
-    }
-}
-
-void print_free_set() {
-    printf("#### FREE SET\n");
-    for (int i = 7; i < 64; ++i) {
-        unsigned count = 0;
-        FreeNode* node = free_set[i];
-        while (node) {
-            node = node->next;
-            count += 1;
-        }
-        if (count > 0) {
-            printf("%d: %d\n", i, count);
-        }
-    }
+    printf("\n");
+    printf("table size: %d\n", size);
 }
 
 void BlockPool::DebugPrint() {
@@ -818,13 +721,7 @@ void BlockPool::DebugPrint() {
             pool->DebugPrintPool();
         }
     }
-
-#ifndef USE_STD_MAP
-    rb_tree_print();
-#endif
-
-    print_sparse_set();
-    print_free_set();
+    print_sparse_table();
 }
 
 void BlockPool::DebugPrintPool() {
@@ -835,7 +732,7 @@ void BlockPool::DebugPrintPool() {
         for (int i = 0; i < m_bitset_entries; ++i) {
             int num_free = 0;
             for (int index = 0; index < 64; ++index) {
-                if (superblock->free[i] & (1ull << index)) {
+                if (superblock->free[i] & (u64{1} << index)) {
                     num_free += 1;
                 }
             }
@@ -856,5 +753,10 @@ void BlockPool::DebugPrintPool() {
         }
         printf("\n");
     }
+}
+
+void BlockPool::DebugRebalance(int new_bits) {
+    rebalance_sparse_table(new_bits);
+    print_sparse_table();
 }
 

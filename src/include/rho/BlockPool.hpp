@@ -28,6 +28,8 @@ class BlockPool {
         /** Visualize this block pool. */
         void DebugPrintPool();
 
+        static void DebugRebalance(int low_bits);
+
     private:
         /**
          * Used as an arena for allocating blocks. The Superblock members are
@@ -42,8 +44,8 @@ class BlockPool {
 
         struct FreeListEntry {
             FreeListEntry* next;
-            unsigned block;
-            Superblock* superblock;
+            u32 block;
+            u32 superblock_index;
         };
 
         size_t m_block_size; // Number of bytes per block.
@@ -63,7 +65,7 @@ class BlockPool {
         void* AllocSmall();
 
         /** Free a block in this block pool. */
-        void FreeSmall(void* pointer, Superblock* superblock);
+        void FreeSmall(void* p, unsigned superblock_id);
 
         /** Apply a function to all blocks in this pool. */
         void ApplyToPoolBlocks(std::function<void(void*)> f);
@@ -74,7 +76,7 @@ class BlockPool {
         Superblock* AddSuperblock();
 
         /** Tag a block as allocated. */
-        void* AllocateBlock(Superblock* superblock, unsigned block);
+        void* AllocateBlock(Superblock* superblock, int block);
 
         /** Tag a block as allocated. */
         static Superblock* SuperblockFromPointer(void* pointer);
