@@ -63,7 +63,7 @@ unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
 // The low pointer bits are masked out in the hash function.
-#define LOW_BITS (19)
+#define LOW_BITS (20)
 #define MAX_COLLISIONS (6)
 #define MAX_REBALANCE_COLLISIONS (3)
 
@@ -73,10 +73,11 @@ unsigned hash_mask = num_sparse_buckets - 1;
 static BlockPool* pools[NUM_POOLS];
 
 static unsigned hash_ptr(uintptr_t ptr, unsigned hash_mask) {
-    unsigned low = (ptr << 4) & 0xFFFFFFFF;
+    unsigned low = ptr & 0xFFFFFFFF;
     unsigned hi = (ptr >> 32) & 0xFFFFFFFF;
     unsigned hash = low ^ hi;
     low = hash & 0xFFFF;
+    low = (low >> 14) | (low << 2);
     hi = (hash >> 16) & 0xFFFF;
     hash = low ^ hi ^ (ptr & (~0xFFFF));
     return hash & hash_mask;
