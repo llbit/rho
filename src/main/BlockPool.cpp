@@ -63,7 +63,7 @@ unsigned num_sparse_buckets = 1 << sparse_bits;
 unsigned hash_mask = num_sparse_buckets - 1;
 
 // The low pointer bits are masked out in the hash function.
-#define LOW_BITS (15)
+#define LOW_BITS (19)
 #define MAX_COLLISIONS (6)
 #define MAX_REBALANCE_COLLISIONS (3)
 
@@ -162,8 +162,9 @@ static unsigned next_log2_32(int size) {
 #define SB_HEADER_SIZE (1040)
 
 // 1 Mbyte for medium block arenas.
-#define MEDIUM_ARENA_SIZE_LOG2 (19)
-#define MEDIUM_ARENA_SIZE (1 << MEDIUM_ARENA_SIZE_LOG2)
+#define LARGE_ARENA_SIZE_LOG2 (19)
+#define LARGE_ARENA_SIZE (1 << LARGE_ARENA_SIZE_LOG2)
+#define LARGE_HEADER_SIZE (1040)
 
 void* megaarena = nullptr;
 uintptr_t sbstart;
@@ -302,8 +303,8 @@ bool remove_sparse_block(uintptr_t pointer) {
         bucket = &sparse_buckets[hash];
         if (bucket->data != 0) {
             uintptr_t data = bucket->data & ~u64{3};
-            uintptr_t first_block = data + SB_HEADER_SIZE;
-            if ((bucket->data & 2) && first_block <= pointer && (data + MEDIUM_ARENA_SIZE) > pointer) {
+            uintptr_t first_block = data + LARGE_HEADER_SIZE;
+            if ((bucket->data & 2) && first_block <= pointer && (data + LARGE_ARENA_SIZE) > pointer) {
                 BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(data);
                 unsigned index = (pointer - first_block) >> superblock->block_size;
                 unsigned bitset = index / 64;
@@ -355,7 +356,7 @@ bool remove_sparse_block(uintptr_t pointer) {
 }
 
 void add_free_block(uintptr_t data, unsigned size_log2) {
-    FreeNode* new_node = reinterpret_cast<FreeNode*>(reinterpret_cast<void*>(data));
+    FreeNode* new_node = reinterpret_cast<FreeNode*>(data);
     new_node->next = free_set[size_log2];
     free_set[size_log2] = new_node;
 }
@@ -422,23 +423,23 @@ void* BlockPool::AllocBlock(size_t bytes) {
 void* BlockPool::AllocLarge(unsigned log2) {
     void* result = nullptr;
     if (log2 <= 17) {
-        unsigned num_blocks = (MEDIUM_ARENA_SIZE - SB_HEADER_SIZE) >> log2;
+        unsigned num_blocks = (LARGE_ARENA_SIZE - LARGE_HEADER_SIZE) >> log2;
         BigSuperblock* superblock;
         if (large_superblocks[log2]) {
             // Reuse existing superblock for this allocation size.
             superblock = large_superblocks[log2];
         } else {
             // Allocate a midsize superblock.
-            void* arena = new double[MEDIUM_ARENA_SIZE];
+            void* arena = new double[LARGE_ARENA_SIZE / sizeof(double)];
             superblock = reinterpret_cast<BigSuperblock*>(arena);
             superblock->block_size = log2;
             superblock->free_list = nullptr;
             superblock->next_untouched = 0;
-            unsigned bitset_entries = ((1 << (MEDIUM_ARENA_SIZE_LOG2 - log2)) + 63) / 64;
+            unsigned bitset_entries = ((1 << (LARGE_ARENA_SIZE_LOG2 - log2)) + 63) / 64;
             for (int i = 0; i < bitset_entries; ++i) {
                 superblock->free[i] = ~0ull;
             }
-            add_sparse_block(reinterpret_cast<uintptr_t>(arena) | 2, MEDIUM_ARENA_SIZE_LOG2);
+            add_sparse_block(reinterpret_cast<uintptr_t>(arena) | 2, LARGE_ARENA_SIZE_LOG2);
             large_superblocks[log2] = superblock;
         }
         if (superblock->free_list) {
@@ -456,7 +457,7 @@ void* BlockPool::AllocLarge(unsigned log2) {
             unsigned index = superblock->next_untouched;
             unsigned bitset = index / 64;
             superblock->free[bitset] &= ~(u64{1} << (index & 63));
-            result = reinterpret_cast<char*>(superblock) + SB_HEADER_SIZE + (index << log2);
+            result = reinterpret_cast<char*>(superblock) + LARGE_HEADER_SIZE + (index << log2);
             superblock->next_untouched += 1;
             if (superblock->next_untouched == num_blocks) {
                 large_superblocks[log2] = nullptr;
@@ -467,7 +468,7 @@ void* BlockPool::AllocLarge(unsigned log2) {
         if (result) {
             add_sparse_block(reinterpret_cast<uintptr_t>(result), log2);
         } else {
-            result = new double[1L << log2];
+            result = new double[(1L << log2) / sizeof(double)];
             add_sparse_block(reinterpret_cast<uintptr_t>(result), log2);
         }
     }
@@ -553,8 +554,7 @@ BlockPool::Superblock* BlockPool::AddSuperblock() {
 void* BlockPool::AllocateBlock(Superblock* superblock, int block) {
     int bitset = block / 64;
     superblock->free[bitset] &= ~(u64{1} << (block & 63));
-    return reinterpret_cast<char*>(superblock)
-        + SB_HEADER_SIZE + block * m_block_size;
+    return reinterpret_cast<char*>(superblock) + SB_HEADER_SIZE + block * m_block_size;
 }
 
 void BlockPool::ApplyToPoolBlocks(std::function<void(void*)> fun) {
@@ -599,10 +599,10 @@ void BlockPool::ApplyToAllBlocks(std::function<void(void*)> fun) {
                 if (bucket.data & 2) {
                     // This is a large superblock.
                     BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(pointer);
-                    uintptr_t block = reinterpret_cast<uintptr_t>(pointer) + SB_HEADER_SIZE;
-                    uintptr_t block_end = reinterpret_cast<uintptr_t>(pointer) + MEDIUM_ARENA_SIZE;
+                    uintptr_t block = reinterpret_cast<uintptr_t>(pointer) + LARGE_HEADER_SIZE;
+                    uintptr_t block_end = reinterpret_cast<uintptr_t>(pointer) + LARGE_ARENA_SIZE;
                     unsigned block_size = 1 << superblock->block_size;
-                    unsigned bitset_entries = ((1 << (MEDIUM_ARENA_SIZE_LOG2 - superblock->block_size)) + 63) / 64;
+                    unsigned bitset_entries = ((1 << (LARGE_ARENA_SIZE_LOG2 - superblock->block_size)) + 63) / 64;
                     for (int i = 0; i < bitset_entries; ++i) {
                         if (superblock->free[i] != ~0ull) {
                             for (int index = 0; index < 64; ++index) {
@@ -656,8 +656,8 @@ void* BlockPool::Lookup(void* candidate) {
             if (bucket.data && bucket.data != deleted_bucket) {
                 uintptr_t pointer = bucket.data & ~uintptr_t{3};
                 if (bucket.data & 2) {
-                    uintptr_t first_block = pointer + SB_HEADER_SIZE;
-                    if (first_block <= candidate_uint && pointer + MEDIUM_ARENA_SIZE > candidate_uint) {
+                    uintptr_t first_block = pointer + LARGE_HEADER_SIZE;
+                    if (first_block <= candidate_uint && pointer + LARGE_ARENA_SIZE > candidate_uint) {
                         BigSuperblock* superblock = reinterpret_cast<BigSuperblock*>(pointer);
                         unsigned index = (candidate_uint - first_block) >> superblock->block_size;
                         unsigned bitset = index / 64;
@@ -720,7 +720,7 @@ void* lookup_in_allocation_map(void* tentative_pointer) {
 }
 #endif
 
-static void print_sparse_table() {
+void print_sparse_table() {
     printf(">>>>> SPARSE TABLE\n");
     int size = 0;
     for (int i = 0; i < num_sparse_buckets; i += 16) {
