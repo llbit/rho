@@ -77,7 +77,7 @@ static unsigned hash_ptr(uintptr_t ptr, unsigned hash_mask) {
     unsigned hi = (ptr >> 32) & 0xFFFFFFFF;
     unsigned hash = low ^ hi;
     low = hash & 0xFFFF;
-    low = (low >> 14) | (low << 2);
+    low = (low >> 13) | (low << 3);
     hi = (hash >> 16) & 0xFFFF;
     hash = low ^ hi ^ (ptr & (~0xFFFF));
     return hash & hash_mask;
