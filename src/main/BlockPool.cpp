@@ -1,20 +1,21 @@
-#include "rho/BlockPool.hpp"
+#include <stdio.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <vector>
 #include <map>
-
-#define USE_UNORDERED_MAP
-#ifdef USE_UNORDERED_MAP
-#include <unordered_map>
-#else
-#include <sparsehash/dense_hash_map>
-#endif
-
 #include <cstdint>
 #include <cstdlib>
-#include <stdio.h>
-#include <unistd.h>
+
+#define USE_DENSE_HASH_MAP
+
+#ifdef USE_DENSE_HASH_MAP
+#include <sparsehash/dense_hash_map>
+#else
+#include <unordered_map>
+#endif
+
+#include "rho/BlockPool.hpp"
 
 // The low pointer bits are masked out in the hash function.
 #define LOW_BITS (20)
@@ -68,10 +69,10 @@ struct Allocation {
     Allocation(uintptr_t data, unsigned size): data(data), size_log2(size) { }
 };
 
-#ifdef USE_UNORDERED_MAP
-std::unordered_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map;
+#ifdef USE_DENSE_HASH_MAP
+google::dense_hash_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
 #else
-google::dense_hash_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map;
+std::unordered_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
 #endif
 
 static void allocerr(const char* message) {
@@ -115,8 +116,8 @@ static unsigned probe_func(unsigned hash, int i, unsigned hash_mask) {
     return (hash + i + 1) & hash_mask;
 }
 
-SuperblockFreeNode* free_set_sb[64];
-FreeNode* free_set[64];
+SuperblockFreeNode* superblock_free_lists[64];
+FreeNode* separate_allocation_free_lists[64];
 LargeSuperblock* large_superblocks[18]; // Superblocks with untouched blocks.
 
 uintptr_t deleted_bucket = UINTPTR_MAX;
@@ -212,6 +213,10 @@ BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
 }
 
 void BlockPool::Initialize() {
+#ifdef USE_DENSE_HASH_MAP
+    sparse_map.set_empty_key({ UINTPTR_MAX, UINTPTR_MAX });
+    sparse_map.set_deleted_key({ UINTPTR_MAX / 2, UINTPTR_MAX / 2 });
+#endif
     megaarena = sbrk(MEGASIZE);
     uintptr_t start = (uintptr_t) megaarena;
     uintptr_t end = start + MEGASIZE;
@@ -226,8 +231,8 @@ void BlockPool::Initialize() {
     }
 
     for (int i = 0; i < 64; ++i) {
-        free_set_sb[i] = nullptr;
-        free_set[i] = nullptr;
+        superblock_free_lists[i] = nullptr;
+        separate_allocation_free_lists[i] = nullptr;
     }
 
     for (int i = 0; i < 18; ++i) {
@@ -268,8 +273,8 @@ bool remove_sparse_block(uintptr_t pointer) {
             SuperblockFreeNode* node = reinterpret_cast<SuperblockFreeNode*>(pointer);
             node->block = index;
             node->superblock = superblock;
-            node->next = free_set_sb[superblock->block_size];
-            free_set_sb[superblock->block_size] = node;
+            node->next = superblock_free_lists[superblock->block_size];
+            superblock_free_lists[superblock->block_size] = node;
             return true;
         } else {
             data &= ~uintptr_t{3}; // Mask away flag bits.
@@ -291,24 +296,24 @@ bool remove_sparse_block(uintptr_t pointer) {
 
 void add_free_block(uintptr_t pointer, unsigned size_log2) {
     FreeNode* new_node = reinterpret_cast<FreeNode*>(pointer);
-    new_node->next = free_set[size_log2];
-    free_set[size_log2] = new_node;
+    new_node->next = separate_allocation_free_lists[size_log2];
+    separate_allocation_free_lists[size_log2] = new_node;
 }
 
 void* remove_free_block(unsigned size_log2) {
     if (size_log2 <= 17) {
-        SuperblockFreeNode* node = free_set_sb[size_log2];
+        SuperblockFreeNode* node = superblock_free_lists[size_log2];
         if (node) {
             unsigned index = node->block;
             unsigned bitset = index / 64;
             node->superblock->free[bitset] &= ~(u64{1} << (index & 63)); // Mark block as allocated.
-            free_set_sb[size_log2] = node->next;
+            superblock_free_lists[size_log2] = node->next;
         }
         return static_cast<void*>(node);
     } else {
-        FreeNode* node = free_set[size_log2];
+        FreeNode* node = separate_allocation_free_lists[size_log2];
         if (node) {
-            free_set[size_log2] = node->next;
+            separate_allocation_free_lists[size_log2] = node->next;
         }
         add_sparse_block(reinterpret_cast<uintptr_t>(node), size_log2);
         return static_cast<void*>(node);
