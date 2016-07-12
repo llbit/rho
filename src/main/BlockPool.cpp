@@ -37,6 +37,8 @@ static void remove_from_allocation_map(void* allocation);
 static void* lookup_in_allocation_map(void* tentative_pointer);
 #endif
 
+// If keytype.second is 0 then the key represents an internal pointer,
+// otherwise it represents a range.
 typedef std::pair<uintptr_t, uintptr_t> keytype;
 
 struct PointerHash {
@@ -55,9 +57,11 @@ struct PointerHash {
 
 struct PointerEquality {
     bool operator()(const keytype& a, const keytype& b) const {
-        // Returns true if a is inside b or b is inside a:
-        return (a.first >= b.first && a.second < b.second)
-           || (b.first >= a.first && b.second < a.second);
+        // Returns true if a is inside b or b is inside a (if either is a pointer),
+        // otherwise returns true if the ranges a and b have equal bounds.
+        return (a.second == 0 && (a.first >= b.first && a.first < b.second))
+            || (b.second == 0 && (b.first >= a.first && b.first < a.second))
+            || (a.first == b.first && a.second == b.second);
     }
 };
 
@@ -214,8 +218,8 @@ BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
 
 void BlockPool::Initialize() {
 #ifdef USE_DENSE_HASH_MAP
-    sparse_map.set_empty_key({ UINTPTR_MAX, UINTPTR_MAX });
-    sparse_map.set_deleted_key({ UINTPTR_MAX / 2, UINTPTR_MAX / 2 });
+    sparse_map.set_empty_key({ 0, 0 });
+    sparse_map.set_deleted_key({ UINTPTR_MAX, UINTPTR_MAX });
 #endif
     megaarena = sbrk(MEGASIZE);
     uintptr_t start = (uintptr_t) megaarena;
@@ -241,14 +245,17 @@ void BlockPool::Initialize() {
 }
 
 void add_sparse_block(uintptr_t pointer, unsigned size_log2) {
-    uintptr_t data = pointer;
-    uintptr_t block_end = pointer + (uintptr_t{1} << size_log2);
+    uintptr_t data = pointer | 1; // Add first flag - indicates the first hashtable entry.
+    // Not necessary to clearn superblock flag in pointer since internal object
+    // pointers never point to the header of a superblock.
+    uintptr_t block_end = pointer + (uintptr_t{1} << size_log2); // One-past-end pointer for the allocation.
     uintptr_t key = pointer >> LOW_BITS;
     uintptr_t key_end = (pointer + (1L << size_log2) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
     do {
-        sparse_map.insert({ keytype(pointer, block_end), { data, size_log2 } });
         key += 1;
-        pointer = key << LOW_BITS;
+        uintptr_t next_pointer = key << LOW_BITS;
+        sparse_map.insert({ keytype(pointer, std::min(next_pointer, block_end)), { data, size_log2 } });
+        pointer = next_pointer;
         data &= ~uintptr_t{1}; // Mask away first flag.
     } while (key < key_end);
 }
@@ -256,7 +263,7 @@ void add_sparse_block(uintptr_t pointer, unsigned size_log2) {
 void add_free_block(uintptr_t data, unsigned size);
 
 bool remove_sparse_block(uintptr_t pointer) {
-    keytype keyobj(pointer, pointer);
+    keytype keyobj(pointer, 0);
     auto iter = sparse_map.find(keyobj);
     if (iter != sparse_map.end()) {
         uintptr_t data = iter->second.data;
@@ -283,7 +290,7 @@ bool remove_sparse_block(uintptr_t pointer) {
             uintptr_t key = pointer >> LOW_BITS;
             uintptr_t key_end = (pointer + (1L << size_log2) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
             do {
-                sparse_map.erase(keytype(pointer, pointer));
+                sparse_map.erase(keytype(pointer, 0));
                 key += 1;
                 pointer = key << LOW_BITS;
             } while (key < key_end);
@@ -314,8 +321,8 @@ void* remove_free_block(unsigned size_log2) {
         FreeNode* node = separate_allocation_free_lists[size_log2];
         if (node) {
             separate_allocation_free_lists[size_log2] = node->next;
+            add_sparse_block(reinterpret_cast<uintptr_t>(node), size_log2);
         }
-        add_sparse_block(reinterpret_cast<uintptr_t>(node), size_log2);
         return static_cast<void*>(node);
     }
 }
@@ -592,7 +599,7 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-        keytype keyobj(candidate_uint, candidate_uint);
+        keytype keyobj(candidate_uint, 0);
         auto iter = sparse_map.find(keyobj);
         if (iter != sparse_map.end()) {
             uintptr_t data = iter->second.data;
