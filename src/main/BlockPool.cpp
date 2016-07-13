@@ -18,7 +18,7 @@
 #include "rho/BlockPool.hpp"
 
 // The low pointer bits are masked out in the hash function.
-#define LOW_BITS (20)
+#define LOW_BITS (19)
 #define MAX_COLLISIONS (6)
 #define MAX_REBALANCE_COLLISIONS (3)
 
@@ -37,13 +37,9 @@ static void remove_from_allocation_map(void* allocation);
 static void* lookup_in_allocation_map(void* tentative_pointer);
 #endif
 
-// If keytype.second is 0 then the key represents an internal pointer,
-// otherwise it represents a range.
-typedef std::pair<uintptr_t, uintptr_t> keytype;
-
 struct PointerHash {
-    std::size_t operator()(const keytype& key) const {
-        uintptr_t pointer = key.first >> LOW_BITS;
+    std::size_t operator()(uintptr_t key) const {
+        uintptr_t pointer = key >> LOW_BITS;
         unsigned low = pointer & 0xFFFFFFFF;
         unsigned hi = (pointer >> 32) & 0xFFFFFFFF;
         unsigned hash = low ^ hi;
@@ -55,13 +51,38 @@ struct PointerHash {
     }
 };
 
+static bool is_pointer_(uintptr_t x) {
+    return (x & 3) == 0;
+}
+
+static bool is_range(uintptr_t x) {
+    return (x & 2) != 0;
+}
+
+static bool in_range(uintptr_t pointer, uintptr_t range) {
+    uintptr_t lim = range & ~uintptr_t{3};
+    if (range & 1) {
+        return pointer < lim;
+    } else {
+        return pointer >= lim;
+    }
+}
+
+// If the lowest bit of the key is 1 then the key points a chunk key and the
+// key points to the portion of the chunk above the key. If it is 0 then the
+// key points to the portion below the key.
 struct PointerEquality {
-    bool operator()(const keytype& a, const keytype& b) const {
-        // Returns true if a is inside b or b is inside a (if either is a pointer),
-        // otherwise returns true if the ranges a and b have equal bounds.
-        return (a.second == 0 && (a.first >= b.first && a.first < b.second))
-            || (b.second == 0 && (b.first >= a.first && b.first < a.second))
-            || (a.first == b.first && a.second == b.second);
+    bool operator()(uintptr_t a, uintptr_t b) const {
+        if ((a >> LOW_BITS) != (b >> LOW_BITS)) {
+            return false;
+        }
+        if (is_pointer_(a) && is_range(b)) {
+            return in_range(a, b);
+        }
+        if (is_pointer_(b) && is_range(a)) {
+            return in_range(b, a);
+        }
+        return a == b;
     }
 };
 
@@ -74,9 +95,9 @@ struct Allocation {
 };
 
 #ifdef USE_DENSE_HASH_MAP
-google::dense_hash_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
+google::dense_hash_map<uintptr_t, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
 #else
-std::unordered_map<keytype, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
+std::unordered_map<uintptr_t, Allocation, PointerHash, PointerEquality> sparse_map(1 << 12);
 #endif
 
 static void allocerr(const char* message) {
@@ -218,8 +239,8 @@ BlockPool::BlockPool(size_t block_size, size_t superblock_bytes)
 
 void BlockPool::Initialize() {
 #ifdef USE_DENSE_HASH_MAP
-    sparse_map.set_empty_key({ 0, 0 });
-    sparse_map.set_deleted_key({ UINTPTR_MAX, UINTPTR_MAX });
+    sparse_map.set_empty_key(1);
+    sparse_map.set_deleted_key(UINTPTR_MAX & ~uintptr_t{2});
 #endif
     megaarena = sbrk(MEGASIZE);
     uintptr_t start = (uintptr_t) megaarena;
@@ -246,15 +267,18 @@ void BlockPool::Initialize() {
 
 void add_sparse_block(uintptr_t pointer, unsigned size_log2) {
     uintptr_t data = pointer | 1; // Add first flag - indicates the first hashtable entry.
-    // Not necessary to clearn superblock flag in pointer since internal object
-    // pointers never point to the header of a superblock.
+    pointer &= ~uintptr_t{3}; // Must clear flag bits because hash keys use their own flags.
     uintptr_t block_end = pointer + (uintptr_t{1} << size_log2); // One-past-end pointer for the allocation.
     uintptr_t key = pointer >> LOW_BITS;
     uintptr_t key_end = (pointer + (1L << size_log2) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
     do {
         key += 1;
         uintptr_t next_pointer = key << LOW_BITS;
-        sparse_map.insert({ keytype(pointer, std::min(next_pointer, block_end)), { data, size_log2 } });
+        if (block_end >= next_pointer) {
+            sparse_map.insert({ pointer | 2, { data, size_log2 } });
+        } else {
+            sparse_map.insert({ block_end | 3, { data, size_log2 } });
+        }
         pointer = next_pointer;
         data &= ~uintptr_t{1}; // Mask away first flag.
     } while (key < key_end);
@@ -263,8 +287,7 @@ void add_sparse_block(uintptr_t pointer, unsigned size_log2) {
 void add_free_block(uintptr_t data, unsigned size);
 
 bool remove_sparse_block(uintptr_t pointer) {
-    keytype keyobj(pointer, 0);
-    auto iter = sparse_map.find(keyobj);
+    auto iter = sparse_map.find(pointer & ~uintptr_t{3});
     if (iter != sparse_map.end()) {
         uintptr_t data = iter->second.data;
         unsigned size_log2 = iter->second.size_log2;
@@ -284,16 +307,22 @@ bool remove_sparse_block(uintptr_t pointer) {
             superblock_free_lists[superblock->block_size] = node;
             return true;
         } else {
-            data &= ~uintptr_t{3}; // Mask away flag bits.
             // This is a separate allocation.
             // Remove all internal mapped pointers.
+            uintptr_t block_end = pointer + (uintptr_t{1} << size_log2); // One-past-end pointer for the allocation.
             uintptr_t key = pointer >> LOW_BITS;
             uintptr_t key_end = (pointer + (1L << size_log2) + ((1L << LOW_BITS) - 1)) >> LOW_BITS;
             do {
-                sparse_map.erase(keytype(pointer, 0));
                 key += 1;
-                pointer = key << LOW_BITS;
+                uintptr_t next_pointer = key << LOW_BITS;
+                if (block_end >= next_pointer) {
+                    sparse_map.erase(pointer | 2);
+                } else {
+                    sparse_map.erase(block_end | 3);
+                }
+                pointer = next_pointer;
             } while (key < key_end);
+            data &= ~uintptr_t{3}; // Mask away flag bits.
             add_free_block(data, size_log2);
         }
         return true;
@@ -599,8 +628,7 @@ void* BlockPool::Lookup(void* candidate) {
             result = nullptr;
         }
     } else if (candidate >= heap_start && candidate < heap_end) {
-        keytype keyobj(candidate_uint, 0);
-        auto iter = sparse_map.find(keyobj);
+        auto iter = sparse_map.find(candidate_uint & ~uintptr_t{3});
         if (iter != sparse_map.end()) {
             uintptr_t data = iter->second.data;
             unsigned size_log2 = iter->second.size_log2;
@@ -666,8 +694,17 @@ void print_sparse_table() {
     for (auto iter = sparse_map.begin(); iter != sparse_map.end(); ++iter) {
         uintptr_t data = iter->second.data;
         unsigned size_log2 = iter->second.size_log2;
-        printf("%p .. %p -> %p (%d)\n", reinterpret_cast<void*>(iter->first.first),
-                reinterpret_cast<void*>(iter->first.second),
+        uintptr_t start, end;
+        if (iter->first & 1) {
+            start = ((iter->first) >> LOW_BITS) << LOW_BITS;
+            end = iter->first - 1;
+        } else {
+            start = iter->first;
+            end = iter->first + (1 << LOW_BITS);
+        }
+        printf("%p: %p .. %p -> %p (%d)\n", reinterpret_cast<void*>(iter->first),
+                reinterpret_cast<void*>(start),
+                reinterpret_cast<void*>(end),
                 reinterpret_cast<void*>(data), size_log2);
     }
 }
