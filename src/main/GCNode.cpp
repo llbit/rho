@@ -51,9 +51,35 @@
 using namespace std;
 using namespace rho;
 
+// Dirty objects.
+vector<const GCNode*> GCNode::s_dirty_nodes;
+
+// Remembered outgoing references of dirty objects.
+vector<const GCNode*> GCNode::s_remembered_references;
+
 vector<const GCNode*>* GCNode::s_moribund = 0;
 unsigned int GCNode::s_num_nodes = 0;
 bool GCNode::s_on_stack_bits_correct = false;
+
+bool GCNode::isDirty() const {
+    return (m_rcmms & s_dirty_mask) != 0;
+}
+
+void GCNode::clearDirtyFlag() const {
+    m_rcmms &= static_cast<unsigned char>(~s_dirty_mask);
+}
+
+void GCNode::markDirty() const {
+    if (!isDirty()) {
+        m_rcmms |= s_dirty_mask;
+        s_dirty_nodes.push_back(this);
+	applyToCoalescedReferences([](const GCNode* node) {
+            if (node) {
+                s_remembered_references.push_back(node);
+            }
+        });
+    }
+}
 
 // Used to update reference count bits of a GCNode. The array element at index
 // n+1 is XORed with the current rcmms bits to compute the updated reference
@@ -61,9 +87,7 @@ bool GCNode::s_on_stack_bits_correct = false;
 // the other bits in m_rcmms.
 const unsigned char GCNode::s_decinc_refcount[]
 = {0,    2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 2, 0x1e,
-   0x1e, 2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 2, 0x3e,
-   0x3e, 2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 2, 0x1e,
-   0x1e, 2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 0,    0};
+   0x1e, 2, 2, 6, 6, 2, 2, 0xe, 0xe, 2, 2, 6, 6, 2, 0, 0};
 
 unsigned char GCNode::s_mark = 0;
 
@@ -116,7 +140,30 @@ void GCNode::destruct_aux() {
     }
     s_moribund->erase(it);
 }
-    
+
+void GCNode::applyCoalescedReferenceUpdates() {
+    // Increment all current outgoing references.
+    // This happens first, so that we don't prematurely reach a zero count and
+    // delete a remembered reference.
+    for (auto node : s_dirty_nodes) {
+        node->clearDirtyFlag();
+        node->applyToCoalescedReferences([](const GCNode* node) {
+            incRefCount(node);
+        });
+    }
+    s_dirty_nodes.clear();
+
+    // Decrement the reference count of all remembered references.
+    for (auto node : s_remembered_references) {
+        // Ensure it is still allocated using asGCNode().
+        if (!asGCNode(const_cast<GCNode*>(node))) {
+            Rf_error("remembered reference deleted when expected to not be");
+        }
+        decRefCount(node);
+    }
+    s_remembered_references.clear();
+}
+
 extern RObject* R_Srcref;
 
 void GCNode::gc(bool markSweep) {
@@ -143,6 +190,8 @@ void GCNode::markSweepGC() {
     // any code that depends on normal operation of the garbage collector.
     s_on_stack_bits_correct = true;
 
+    applyCoalescedReferenceUpdates();
+
     mark();
     sweep();
 
@@ -151,6 +200,8 @@ void GCNode::markSweepGC() {
 
 void GCNode::gclite() {
     s_on_stack_bits_correct = true;
+
+    applyCoalescedReferenceUpdates();
 
     while (!s_moribund->empty()) {
         // Last in, first out, for cache efficiency:
