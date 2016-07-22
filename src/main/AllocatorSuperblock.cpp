@@ -247,6 +247,7 @@ void rho::AllocatorSuperblock::applyToBlocks(std::function<void(void*)> fun) {
           }
 #endif
 #ifdef HAVE_ADDRESS_SANITIZER
+          // Add redzone offset before calling the function.
           fun(GCNodeAllocator::offsetPointer(
               reinterpret_cast<void*>(block),
               GCNodeAllocator::s_redzone_size));

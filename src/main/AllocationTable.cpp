@@ -198,6 +198,7 @@ void rho::AllocationTable::applyToAllAllocations(std::function<void(void*)> fun)
           }
 #endif
 #ifdef HAVE_ADDRESS_SANITIZER
+          // Add redzone offset before calling the function.
           fun(GCNodeAllocator::offsetPointer(bucket.asPointer(),
               GCNodeAllocator::s_redzone_size));
 #else

@@ -392,7 +392,7 @@ static void* lookup_in_allocation_map(void* tentative_pointer) {
 
 #ifdef HAVE_ADDRESS_SANITIZER
 void* rho::GCNodeAllocator::offsetPointer(void* pointer, std::size_t bytes) {
-    return static_cast<char*>(pointer) + bytes;
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(pointer) + bytes);
 }
 
 void rho::GCNodeAllocator::addToQuarantine(rho::FreeListNode* free_node, unsigned size_class) {

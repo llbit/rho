@@ -49,17 +49,17 @@ namespace rho {
     FreeListNode* m_next;
 
     /**
-     * An index into a superblock used to update the free bitset when this
-     * allocation is reclaimed from a freelist.
-     */
-    std::uint32_t m_block;
-
-    /**
      * The m_superblock pointer is only used for superblock free nodes. It is
      * used to update the free bitset when this allocation is reclaimed from a
      * freelist.
      */
     AllocatorSuperblock* m_superblock;
+
+    /**
+     * An index into a superblock used to update the free bitset when this
+     * allocation is reclaimed from a freelist.
+     */
+    std::uint32_t m_block;
   };
 
   /**
@@ -201,7 +201,7 @@ namespace rho {
       static FreeListNode* s_quarantine[s_num_freelists];
 
       /** Redzones are added before and after the allocation. */
-      static constexpr int s_redzone_size = 0;
+      static constexpr int s_redzone_size = 8;
 
       /** Helper function for redzone address calculations. */
       static void* offsetPointer(void* pointer, std::size_t bytes);
