@@ -47,16 +47,19 @@ namespace rho {
    */
   struct FreeListNode {
     FreeListNode* m_next;
-    std::uint32_t m_block;  // Used only for superblock free nodes.
-    AllocatorSuperblock* m_superblock;  // Used only for superblock free nodes.
 
     /**
-     * Insert this allocation into the superblock freelist for the given
-     * allocation size.
-     *
-     * @param size_class the size class for the allocation.
+     * An index into a superblock used to update the free bitset when this
+     * allocation is reclaimed from a freelist.
      */
-    void addToSuperblockFreelist(unsigned size_class);
+    std::uint32_t m_block;
+
+    /**
+     * The m_superblock pointer is only used for superblock free nodes. It is
+     * used to update the free bitset when this allocation is reclaimed from a
+     * freelist.
+     */
+    AllocatorSuperblock* m_superblock;
   };
 
   /**
@@ -81,9 +84,6 @@ namespace rho {
       /** \brief Apply function to all current allocations. */
       static void applyToAllAllocations(std::function<void(void*)> f);
 
-      /** \brief Print allocation overview for debugging. */
-      static void debugPrint();
-
       /** \brief Free a previously allocated object. */
       static void free(void* p);
 
@@ -104,6 +104,9 @@ namespace rho {
        */
       static GCNode* lookupPointer(void* candidate);
 
+      /** \brief Print allocator state summary for debugging. */
+      static void printSummary();
+
     private:
       friend class AllocatorSuperblock;
       friend class AllocationTable;
@@ -113,28 +116,61 @@ namespace rho {
       static AllocationTable* s_alloctable;
 
       /** Number of different object sizes plus one for the small-object superblocks. */
-      static constexpr int s_num_small_pools = (256 / 8) + 1;
+      static constexpr unsigned s_num_small_pools = (256 / 8) + 1;
 
       /** Number of different object sizes plus one for the medium-object superblocks. */
-      static constexpr int s_num_medium_pools = 18;
+      static constexpr unsigned s_num_medium_pools = 18;
 
-      /** Pointers to superblocks with available blocks, indexed by size class. */
+      /**
+       * The freelists must fit all small superblock size classes, plus
+       * all large allocation sizes (= 33 + 64).
+       */
+      static constexpr unsigned s_num_freelists = s_num_small_pools + 64;
+
+      /** Free list heads, indexed by size class. */
+      static FreeListNode* s_freelists[s_num_freelists];
+
+      /** Pointers to superblocks with untouched blocks, indexed by size class. */
       static AllocatorSuperblock* s_superblocks[s_num_small_pools + s_num_medium_pools];
 
-      /**
-       * Adds an allocation to a freelist.
-       *
-       * This should only be used to add medium superblocks and large separate
-       * allocations to a freelist. Small allocations are managed in a separate
-       * freelist.
-       */
-      static void addToFreelist(uintptr_t data, unsigned size_log2);
+      /** Smallest known heap address. */
+      static uintptr_t s_heap_start;
+
+      /** Largest known heap address. */
+      static uintptr_t s_heap_end;
 
       /**
-       * Removes an allocation from a freelist, returns nullptr if there was no
-       * available free object.
+       * Create a (in place) freelist node for an alloacation and insert in a
+       * freelist by size class.
+       * This should not be used to insert superblock allocations in a freelist
+       * because it nulls out the superblock pointer.
        */
-      static void* removeFromFreelist(unsigned size_log2);
+      static void addToFreelist(uintptr_t data, unsigned size_class);
+
+      /**
+       * \brief Add a free list node to a free list by size class.
+       */
+      static void addToFreelist(FreeListNode* free_node, unsigned size_class);
+
+      /**
+       * Calculate the block size from a specific size class.
+       */
+      static unsigned bytesFromSizeClass(unsigned size_class) {
+        if (size_class < s_num_small_pools) {
+          return size_class * 8;
+        } else {
+          return 1 << (size_class - s_num_small_pools);
+        }
+      }
+
+      /**
+       * Removes an allocation from a freelist by size class, returns nullptr
+       * if there was no available free object.
+       */
+      static void* removeFromFreelist(unsigned size_class);
+
+      /** Update heap bounds for medium/large allocations. */
+      static void updateHeapBounds(void* pointer, size_t size);
 
 #ifdef HAVE_ADDRESS_SANITIZER
 
@@ -154,12 +190,8 @@ namespace rho {
       /** Maximum quarantine size = 10Mb. */
       static constexpr int s_max_quarantine_size = 10 << 20;
 
-      /**
-       * The quarantine must fit all small superblock size classes, plus
-       * all large allocation sizes (= 33 + 64).
-       */
-      static constexpr int s_num_quarantine_entries = s_num_small_pools + 64;
-      static FreeListNode* s_quarantine[s_num_quarantine_entries];
+      /** The quarantine freelists are organized just like the regular freelists. */
+      static FreeListNode* s_quarantine[s_num_freelists];
 
       /** Redzones are added before and after the allocation. */
       static constexpr int s_redzone_size = 16;

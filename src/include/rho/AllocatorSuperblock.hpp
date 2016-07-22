@@ -34,16 +34,13 @@
 
 namespace rho {
 
-  // The full declaration of FreeListNode is in GCNodeAllocator.hpp.
-  struct FreeListNode;
-
   /**
    * Superblocks are used to allocate small and medium sized objects.
    * The bitset tracks which blocks are currently allocated.
    * For small objects block_size is the actual object size.
    * For medium objects block_size is the 2-log of the object size.
    *
-   * This is the abstract base class for small and large superblocks.
+   * Superblock size is determined by the size_class member.
    */
   class AllocatorSuperblock {
   public:
@@ -54,8 +51,7 @@ namespace rho {
      */
     AllocatorSuperblock(unsigned size_class, unsigned bitset_entries):
         m_size_class(size_class),
-        m_next_untouched(0),
-        m_free_list(nullptr) {
+        m_next_untouched(0) {
       // Here we mark all bitset entries as free so that we don't have to do
       // precise range checking while iterating over currently allocated blocks
       // when the number of blocks is not evenly divisible by 64.
@@ -77,10 +73,10 @@ namespace rho {
     static void* allocateBlock(size_t block_size);
 
     /**
-     * Allocates a small block in this superblock (either from freelist or using
-     * the next untouched block).
+     * Allocates the next untouched block in this superblock.
+     * The superblock must have an untouched block when calling this function.
      */
-    void* allocateBlock();
+    void* allocateNextUntouched();
 
     /** Allocate a medium or large object. */
     static void* allocateLarge(unsigned size_log2);
@@ -186,7 +182,6 @@ namespace rho {
     // These are the superblock header members (1152 bytes total):
     std::uint32_t m_size_class;
     std::uint32_t m_next_untouched;
-    FreeListNode* m_free_list;
     std::uint64_t m_free[s_max_bitset_entries];  // Free bitset, using 64-bit entries.
 
     /** Samll object arena is 1Gb = 30 bits. */
@@ -203,24 +198,13 @@ namespace rho {
      * Medium object superblocks use 2^19 bytes.
      * Minimum object size = 64 bytes.
      */
-    static constexpr unsigned s_medium_superblock_size_log2 = 19;
-    static constexpr unsigned s_medium_superblock_size = 1 << s_medium_superblock_size_log2;
+    static constexpr unsigned s_large_superblock_size_log2 = 19;
+    static constexpr unsigned s_large_superblock_size = 1 << s_large_superblock_size_log2;
 
     /**
      * This array maps size classes to block sizes.
      */
     static unsigned s_size_class[];
-
-    /**
-     * Calculate the block size from a specific size class.
-     */
-    static unsigned blockSizeFromSizeClass(unsigned size_class) {
-      if (size_class < GCNodeAllocator::s_num_small_pools) {
-        return size_class * 8;
-      } else {
-        return 1 << (size_class - GCNodeAllocator::s_num_small_pools);
-      }
-    }
 
     /**
      * Get the block size for this superblock. Depends on m_size_class.
@@ -236,7 +220,7 @@ namespace rho {
       if (m_size_class < GCNodeAllocator::s_num_small_pools) {
         return s_small_superblock_size;
       } else {
-        return s_medium_superblock_size;
+        return s_large_superblock_size;
       }
     }
 
@@ -281,6 +265,12 @@ namespace rho {
      * allocated superblock.
      */
     static AllocatorSuperblock* newSuperblockFromArena(unsigned block_size);
+
+    /**
+     * Allocates a new large superblock for medium-sized allocations.
+     * Large superblocks are allocated outside the small block arena.
+     */
+    static AllocatorSuperblock* newLargeSuperblock(unsigned size_log2);
 
     /**
      * Compute the address of the superblock header from a pointer.

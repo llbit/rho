@@ -52,11 +52,11 @@ rho::AllocationTable* rho::GCNodeAllocator::s_alloctable = nullptr;
 rho::AllocatorSuperblock* rho::GCNodeAllocator::s_superblocks[s_num_small_pools + s_num_medium_pools];
 
 // Tracking heap bounds for fast rejection in pointer lookup.
-static uintptr_t heap_start = UINTPTR_MAX;
-static uintptr_t heap_end = 0;
+uintptr_t rho::GCNodeAllocator::s_heap_start = UINTPTR_MAX;
+uintptr_t rho::GCNodeAllocator::s_heap_end = 0;
 
-// Free lists for large allocations.
-static rho::FreeListNode* freelists[64];
+// Free lists head pointers.
+rho::FreeListNode* rho::GCNodeAllocator::s_freelists[s_num_freelists];
 
 #ifdef ALLOCATION_CHECK
 // Helper function for allocator consistency checking.
@@ -142,18 +142,6 @@ static unsigned next_log2_32(unsigned size) {
   return log2;
 }
 
-/** Update heap bounds for medium/large allocations. */
-static void update_heap_bounds(void* pointer, size_t size) {
-  uintptr_t allocation = reinterpret_cast<uintptr_t>(pointer);
-  if (allocation < heap_start) {
-    heap_start = allocation;
-  }
-  uintptr_t allocation_end = allocation + size;
-  if (allocation_end > heap_end) {
-    heap_end = allocation_end;
-  }
-}
-
 /**
  * Allocate the small object arena, null out freelist head pointers,
  * and initialize the hashtable.
@@ -163,7 +151,7 @@ void rho::GCNodeAllocator::initialize() {
 
 #ifdef HAVE_ADDRESS_SANITIZER
   // Initialize quarantine freelists.
-  for (int i = 0; i < s_num_quarantine_entries; ++i) {
+  for (int i = 0; i < s_num_freelists; ++i) {
     s_quarantine[i] = nullptr;
   }
 #endif
@@ -172,49 +160,11 @@ void rho::GCNodeAllocator::initialize() {
     s_superblocks[i] = nullptr;
   }
 
-  for (int i = 0; i < 64; ++i) {
-    freelists[i] = nullptr;
+  for (int i = 0; i < s_num_freelists; ++i) {
+    s_freelists[i] = nullptr;
   }
 
   s_alloctable = new rho::AllocationTable(16);
-}
-
-void rho::GCNodeAllocator::addToFreelist(uintptr_t data, unsigned size_log2) {
-  FreeListNode* free_node = reinterpret_cast<FreeListNode*>(data);
-#ifdef HAVE_ADDRESS_SANITIZER
-  addToQuarantine(free_node, s_num_small_pools + size_log2);
-#else
-  free_node->m_next = freelists[size_log2];
-  freelists[size_log2] = free_node;
-#endif
-}
-
-void rho::FreeListNode::addToSuperblockFreelist(unsigned size_class) {
-  assert(size_class > 3 && size_class < GCNodeAllocator::s_num_small_pools + GCNodeAllocator::s_num_medium_pools);
-  AllocatorSuperblock* superblock;
-  if (GCNodeAllocator::s_superblocks[size_class]) {
-    superblock = GCNodeAllocator::s_superblocks[size_class];
-  } else {
-    superblock = m_superblock;
-    GCNodeAllocator::s_superblocks[size_class] = superblock;
-  }
-  m_next = superblock->m_free_list;
-  superblock->m_free_list = this;
-}
-
-/**
- * Reuse an allocation from a freelist.
- * Returns null if no reusable allocation was found.
- */
-void* rho::GCNodeAllocator::removeFromFreelist(unsigned size_log2) {
-  FreeListNode* node = freelists[size_log2];
-  if (node) {
-#ifdef HAVE_ADDRESS_SANITIZER
-    ASAN_UNPOISON_MEMORY_REGION(node, 1 << size_log2);
-#endif
-    freelists[size_log2] = node->m_next;
-  }
-  return static_cast<void*>(node);
 }
 
 void* rho::GCNodeAllocator::allocate(size_t bytes) {
@@ -225,16 +175,19 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
 #endif
   unsigned block_bytes;  // The actual allocation size (may be more than requested).
   if (bytes <= 256) {
-    int pool_index = (bytes + 7) / 8;
-    if (pool_index < 4) {
+    int size_class = (bytes + 7) / 8; // Computes ceil(bytes / 8).
+    if (size_class < 4) {
       // Ensure at least 32-byte blocks for the small-object arena. This is
       // required both to fit a FreeListNode (20 bytes), and to reduce the
       // number of bytes needed for the fixed size bitset (as part of the
       // constant SUPERBLOCK_HEADER_SIZE).
-      pool_index = 4;
+      size_class = 4;
     }
-    block_bytes = pool_index * 8;
-    result = AllocatorSuperblock::allocateBlock(block_bytes);
+    block_bytes = size_class * 8;
+    result = removeFromFreelist(size_class);
+    if (!result) {
+      result = AllocatorSuperblock::allocateBlock(block_bytes);
+    }
     if (!result) {
       // Allocating in the small object arena failed, so we have to fall
       // back on using the medium block allocator. To make this work
@@ -250,8 +203,18 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
     // These allocations are rounded up to the next power of two size.
     unsigned size_log2 = next_log2_32(bytes);
     block_bytes = 1 << size_log2;
-    result = AllocatorSuperblock::allocateLarge(size_log2);
-    update_heap_bounds(result, block_bytes);
+    unsigned size_class = size_log2 + s_num_small_pools;
+    result = removeFromFreelist(size_class);
+    if (!result) {
+      if (size_log2 < s_num_medium_pools) {
+        result = AllocatorSuperblock::allocateLarge(size_log2);
+      } else {
+        result = new double[(1L << size_log2) / sizeof(double)];
+        GCNodeAllocator::s_alloctable->insert(result, size_log2);
+      }
+      // Only update heap bounds if allocating a new block.
+      updateHeapBounds(result, block_bytes);
+    }
   }
   if (!result) {
     allocerr("failed to allocate object");
@@ -314,7 +277,7 @@ void rho::GCNodeAllocator::applyToAllAllocations(std::function<void(void*)> fun)
 rho::GCNode* rho::GCNodeAllocator::lookupPointer(void* candidate) {
   uintptr_t candidate_uint = reinterpret_cast<uintptr_t>(candidate);
   void* result = AllocatorSuperblock::lookupAllocation(candidate_uint);
-  if (!result && (candidate_uint >= heap_start && candidate_uint < heap_end)) {
+  if (!result && (candidate_uint >= s_heap_start && candidate_uint < s_heap_end)) {
     result = s_alloctable->lookup_pointer(candidate_uint);
   }
 #ifdef ALLOCATION_CHECK
@@ -331,7 +294,53 @@ rho::GCNode* rho::GCNodeAllocator::lookupPointer(void* candidate) {
   return static_cast<GCNode*>(result);
 }
 
-void rho::GCNodeAllocator::debugPrint() {
+void rho::GCNodeAllocator::addToFreelist(uintptr_t data, unsigned size_class) {
+  FreeListNode* free_node = reinterpret_cast<FreeListNode*>(data);
+  free_node->m_superblock = nullptr;
+  addToFreelist(free_node, size_class);
+}
+
+void rho::GCNodeAllocator::addToFreelist(FreeListNode* free_node, unsigned size_class) {
+#ifdef HAVE_ADDRESS_SANITIZER
+  addToQuarantine(free_node, size_class);
+#else
+  free_node->m_next = s_freelists[size_class];
+  s_freelists[size_class] = free_node;
+#endif
+}
+
+void* rho::GCNodeAllocator::removeFromFreelist(unsigned size_class) {
+  FreeListNode* node = s_freelists[size_class];
+  if (node) {
+#ifdef HAVE_ADDRESS_SANITIZER
+    ASAN_UNPOISON_MEMORY_REGION(node, bytesFromSizeClass(size_class));
+#endif
+    s_freelists[size_class] = node->m_next;
+
+    if (node->m_superblock) {
+      // Tag the resued allocation as allocated since it is part of a superblock.
+      node->m_superblock->tagBlockAllocated(node->m_block);
+    } else {
+      // This is a non-superblock allocation. Insert it back into the allocation table.
+      s_alloctable->insert(static_cast<void*>(node),
+          size_class - s_num_small_pools);
+    }
+  }
+  return static_cast<void*>(node);
+}
+
+void rho::GCNodeAllocator::updateHeapBounds(void* pointer, size_t size) {
+  uintptr_t allocation = reinterpret_cast<uintptr_t>(pointer);
+  if (allocation < s_heap_start) {
+    s_heap_start = allocation;
+  }
+  uintptr_t allocation_end = allocation + size;
+  if (allocation_end > s_heap_end) {
+    s_heap_end = allocation_end;
+  }
+}
+
+void rho::GCNodeAllocator::printSummary() {
   AllocatorSuperblock::debugPrintSmallSuperblocks();
   s_alloctable->printSummary();
 }
@@ -391,7 +400,7 @@ void rho::GCNodeAllocator::addToQuarantine(rho::FreeListNode* free_node, unsigne
   // Add an allocation to the quarantine and poison it.
   static unsigned quarantine_size = 0;  // Separate from small object quarantine size.
 
-  size_t block_size = AllocatorSuperblock::blockSizeFromSizeClass(size_class);
+  size_t block_size = bytesFromSizeClass(size_class);
   quarantine_size += block_size;
   free_node->m_next = s_quarantine[size_class];
   s_quarantine[size_class] = free_node;
@@ -402,30 +411,16 @@ void rho::GCNodeAllocator::addToQuarantine(rho::FreeListNode* free_node, unsigne
     quarantine_size = 0;
     // Now we clear the quarantine.
     // The quarantine contains both blocks in superblocks and large allocations.
-    // Remove all free superblock blocks from quarantine and insert in superblock freelists.
-    for (int i = 0; i < s_num_small_pools + s_num_medium_pools; ++i) {
+    // Remove all free nodes from quarantine and insert in corresponding freelist.
+    for (int i = 0; i < s_num_freelists; ++i) {
       while (s_quarantine[i]) {
         FreeListNode* quarantined_node = s_quarantine[i];
 
         // Unpoison the quarantined allocation so we can link it into a freelist.
         ASAN_UNPOISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));
         s_quarantine[i] = quarantined_node->m_next;
-        quarantined_node->addToSuperblockFreelist(i);
-
-        // Re-poison so the freelist nodes stay poisoned while free.
-        ASAN_POISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));
-      }
-    }
-    // Remove all large ojbects from quarantine and insert in freelists.
-    for (int i = s_num_medium_pools; i < s_num_quarantine_entries; ++i) {
-      while (s_quarantine[i]) {
-        FreeListNode* quarantined_node = s_quarantine[i];
-
-        // Unpoison the allocation so we can link it into a freelist.
-        ASAN_UNPOISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));
-        s_quarantine[i] = quarantined_node->m_next;
-        quarantined_node->m_next = freelists[i];
-        freelists[i] = quarantined_node;
+        quarantined_node->m_next = s_freelists[size_class];
+        s_freelists[size_class] = quarantined_node;
 
         // Re-poison so the freelist nodes stay poisoned while free.
         ASAN_POISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));

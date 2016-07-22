@@ -78,7 +78,7 @@ rho::AllocatorSuperblock* rho::AllocatorSuperblock::newSuperblockFromArena(unsig
   }
   void* pointer = reinterpret_cast<void*>(arena_superblock_next);
 #ifdef HAVE_ADDRESS_SANITIZER
-  // Unpoison only the header.
+  // The whole arena is poisoned on allocation, now we just unpoison this superblock header.
   ASAN_UNPOISON_MEMORY_REGION(pointer, s_superblock_header_size);
 #endif
   unsigned superblock_size =
@@ -87,6 +87,25 @@ rho::AllocatorSuperblock* rho::AllocatorSuperblock::newSuperblockFromArena(unsig
   AllocatorSuperblock* superblock =
       new (pointer)AllocatorSuperblock(smallSizeClass(block_size), bitset_entries);
   arena_superblock_next += s_small_superblock_size;
+  return superblock;
+}
+
+rho::AllocatorSuperblock* rho::AllocatorSuperblock::newLargeSuperblock(unsigned size_log2) {
+  unsigned size_class = largeSizeClass(size_log2);
+  void* memory = new double[s_large_superblock_size / sizeof(double)];
+  unsigned bitset_entries =
+      ((1 << (s_large_superblock_size_log2 - size_log2)) + 63) / 64;
+  AllocatorSuperblock* superblock = new (memory)AllocatorSuperblock(size_class, bitset_entries);
+  GCNodeAllocator::s_alloctable->insertSuperblock(superblock,
+      s_large_superblock_size_log2);
+  GCNodeAllocator::s_superblocks[size_class] = superblock;
+#ifdef HAVE_ADDRESS_SANITIZER
+  // Poison all blocks in the superblock. They are unpoisoned one at a time
+  // later, when allocated.
+  ASAN_POISON_MEMORY_REGION(
+      reinterpret_cast<void*>(superblock->firstBlockPointer()),
+      s_large_superblock_size - s_superblock_header_size);
+#endif
   return superblock;
 }
 
@@ -131,7 +150,6 @@ void* rho::AllocatorSuperblock::allocateBlock(size_t block_size) {
       && "The size argument must be a multiple of 8 bytes");
 
   unsigned size_class = smallSizeClass(block_size);
-
   AllocatorSuperblock* superblock;
   if (GCNodeAllocator::s_superblocks[size_class]) {
     superblock = GCNodeAllocator::s_superblocks[size_class];
@@ -142,39 +160,23 @@ void* rho::AllocatorSuperblock::allocateBlock(size_t block_size) {
     }
     GCNodeAllocator::s_superblocks[size_class] = superblock;
   }
-  return superblock->allocateBlock();
+  return superblock->allocateNextUntouched();
 }
 
-void* rho::AllocatorSuperblock::allocateBlock() {
-  unsigned num_blocks =
-      (superblockSize() - s_superblock_header_size) / blockSize();
-  if (m_free_list) {
-    FreeListNode* free_node = m_free_list;
-#ifdef HAVE_ADDRESS_SANITIZER
-    ASAN_UNPOISON_MEMORY_REGION(free_node, blockSize());
-#endif
-    uint32_t index = free_node->m_block;
-    free_node->m_superblock->tagBlockAllocated(index);
-    m_free_list = free_node->m_next;
-    if (!m_free_list && m_next_untouched == num_blocks) {
-      // This superblock can not allocate any more blocks,
-      // so take it out of the superblock pool.
-      GCNodeAllocator::s_superblocks[m_size_class] = nullptr;
-    }
-    return free_node;
-  } else {
-    uint32_t index = m_next_untouched;
-    tagBlockAllocated(index);
-    m_next_untouched += 1;
-    if (m_next_untouched == num_blocks) {
-      GCNodeAllocator::s_superblocks[m_size_class] = nullptr;
-    }
-    void* result = reinterpret_cast<void*>(firstBlockPointer() + (index * blockSize()));
-#ifdef HAVE_ADDRESS_SANITIZER
-    ASAN_UNPOISON_MEMORY_REGION(result, blockSize());
-#endif
-    return result;
+void* rho::AllocatorSuperblock::allocateNextUntouched() {
+  unsigned block_size = blockSize();
+  unsigned num_blocks = (superblockSize() - s_superblock_header_size) / block_size;
+  uint32_t index = m_next_untouched;
+  tagBlockAllocated(index);
+  m_next_untouched += 1;
+  if (m_next_untouched == num_blocks) {
+    GCNodeAllocator::s_superblocks[m_size_class] = nullptr;
   }
+  void* result = reinterpret_cast<void*>(firstBlockPointer() + (index * block_size));
+#ifdef HAVE_ADDRESS_SANITIZER
+  ASAN_UNPOISON_MEMORY_REGION(result, block_size);
+#endif
+  return result;
 }
 
 void rho::AllocatorSuperblock::freeBlock(void* pointer) {
@@ -189,77 +191,25 @@ void rho::AllocatorSuperblock::freeBlock(void* pointer) {
   FreeListNode* free_node = reinterpret_cast<FreeListNode*>(pointer);
   free_node->m_block = index;
   free_node->m_superblock = this;
-#ifdef HAVE_ADDRESS_SANITIZER
-  GCNodeAllocator::addToQuarantine(free_node, m_size_class);
-#else
-  free_node->addToSuperblockFreelist(m_size_class);
-#endif
+  GCNodeAllocator::addToFreelist(free_node, m_size_class);
 }
 
 void* rho::AllocatorSuperblock::allocateLarge(unsigned size_log2) {
-  assert(size_log2 >= 6
-      && "Can not allocate objects smaller than 64 bytes using allocateLarge");
-  void* result = nullptr;
-  if (size_log2 < GCNodeAllocator::s_num_medium_pools) {
-    unsigned size_class = largeSizeClass(size_log2);
-    unsigned num_blocks =
-        (s_medium_superblock_size - s_superblock_header_size) >> size_log2;
-    AllocatorSuperblock* superblock;
-    if (GCNodeAllocator::s_superblocks[size_class]) {
-      // Reuse existing superblock for this allocation size.
-      superblock = GCNodeAllocator::s_superblocks[size_class];
-    } else {
-      // Allocate a medium superblock.
-      void* arena = new double[s_medium_superblock_size / sizeof(double)];
-      unsigned bitset_entries =
-          ((1 << (s_medium_superblock_size_log2 - size_log2)) + 63) / 64;
-      superblock = new (arena)AllocatorSuperblock(size_class, bitset_entries);
-      GCNodeAllocator::s_alloctable->insert(
-          reinterpret_cast<uintptr_t>(arena) | 2,
-          s_medium_superblock_size_log2);
-      GCNodeAllocator::s_superblocks[size_class] = superblock;
-#ifdef HAVE_ADDRESS_SANITIZER
-      // Poison all blocks in the superblock.
-      ASAN_UNPOISON_MEMORY_REGION(
-          reinterpret_cast<void*>(superblock->firstBlockPointer()),
-          s_medium_superblock_size - s_superblock_header_size);
-#endif
-    }
-    if (superblock->m_free_list) {
-      FreeListNode* free_node = superblock->m_free_list;
-#ifdef HAVE_ADDRESS_SANITIZER
-      ASAN_UNPOISON_MEMORY_REGION(free_node, 1 << size_log2);
-#endif
-      unsigned index = free_node->m_block;
-      free_node->m_superblock->tagBlockAllocated(index);
-      superblock->m_free_list = free_node->m_next;
-      if (!superblock->m_free_list
-          && superblock->m_next_untouched == num_blocks) {
-        GCNodeAllocator::s_superblocks[size_class] = nullptr;
-      }
-      result = free_node;
-    } else {
-      unsigned index = superblock->m_next_untouched;
-      superblock->tagBlockAllocated(index);
-      superblock->m_next_untouched += 1;
-      if (superblock->m_next_untouched == num_blocks) {
-        GCNodeAllocator::s_superblocks[size_class] = nullptr;
-      }
-      result = reinterpret_cast<char*>(superblock) + s_superblock_header_size
-          + (index << size_log2);
-#ifdef HAVE_ADDRESS_SANITIZER
-      ASAN_UNPOISON_MEMORY_REGION(result, 1 << size_log2);
-#endif
-    }
+  assert(size_log2 >= 6 && size_log2 < GCNodeAllocator::s_num_medium_pools
+      && "Can not allocate objects smaller than 64 bytes using allocateLarge()");
+  unsigned size_class = largeSizeClass(size_log2);
+  unsigned num_blocks =
+      (s_large_superblock_size - s_superblock_header_size) >> size_log2;
+  AllocatorSuperblock* superblock;
+  if (GCNodeAllocator::s_superblocks[size_class]) {
+    // Reuse existing superblock for this allocation size.
+    // All superblocks in s_superblocks have at least one untouched block.
+    superblock = GCNodeAllocator::s_superblocks[size_class];
   } else {
-    result = GCNodeAllocator::removeFromFreelist(size_log2);
-    if (!result) {
-      result = new double[(1L << size_log2) / sizeof(double)];
-    }
-    GCNodeAllocator::s_alloctable->insert(
-        reinterpret_cast<uintptr_t>(result), size_log2);
+    // Allocate a new large superblock.
+    superblock = newLargeSuperblock(size_log2);
   }
-  return result;
+  return superblock->allocateNextUntouched();
 }
 
 void rho::AllocatorSuperblock::tagBlockAllocated(unsigned block) {

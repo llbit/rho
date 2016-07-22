@@ -47,14 +47,14 @@ rho::AllocationTable::~AllocationTable() {
   m_buckets = nullptr;
 }
 
-void rho::AllocationTable::insert(uintptr_t pointer, std::size_t size) {
+void rho::AllocationTable::insert(void* pointer, std::size_t size) {
   if (m_capacity == 0) {
     if (!resize(m_num_bits + 1)) {
       allocerr("failed to increase allocation table size");
     }
   }
   m_capacity -= 1;
-  if (!tryInsert(m_buckets, pointer, size)) {
+  if (!tryInsert(m_buckets, reinterpret_cast<uintptr_t>(pointer), size)) {
     allocerr("failed to insert allocation into allocation table");
   }
 }
@@ -175,7 +175,8 @@ bool rho::AllocationTable::freeAllocation(uintptr_t pointer) {
     // Erase all entries in hashtable for the allocation.
     erase(pointer, bucket->m_size_log2);
     // Add allocation to free list.
-    GCNodeAllocator::addToFreelist(pointer, bucket->m_size_log2);
+    GCNodeAllocator::addToFreelist(pointer,
+        AllocatorSuperblock::largeSizeClass(bucket->m_size_log2));
   }
   return true;
 }

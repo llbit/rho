@@ -107,7 +107,16 @@ namespace rho {
      * Add an allocation (large object or medium object superblock) to the
      * allocations hashtable.
      */
-    void insert(uintptr_t pointer, size_t size);
+    void insert(void* pointer, size_t size_log2);
+
+    /**
+     * Add a superblock allocation to the allocations hashtable.
+     */
+    void insertSuperblock(AllocatorSuperblock* superblock, size_t size_log2) {
+      insert(reinterpret_cast<void*>(
+          reinterpret_cast<uintptr_t>(superblock) | Allocation::s_superblock_flag),
+          size_log2);
+    }
 
     /**
      * Lookup a pointer in this hash table. Returns the start
