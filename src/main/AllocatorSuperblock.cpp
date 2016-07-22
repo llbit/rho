@@ -91,14 +91,12 @@ rho::AllocatorSuperblock* rho::AllocatorSuperblock::newSuperblockFromArena(unsig
 }
 
 rho::AllocatorSuperblock* rho::AllocatorSuperblock::newLargeSuperblock(unsigned size_log2) {
-  unsigned size_class = largeSizeClass(size_log2);
   void* memory = new double[s_large_superblock_size / sizeof(double)];
   unsigned bitset_entries =
       ((1 << (s_large_superblock_size_log2 - size_log2)) + 63) / 64;
-  AllocatorSuperblock* superblock = new (memory)AllocatorSuperblock(size_class, bitset_entries);
+  AllocatorSuperblock* superblock = new (memory)AllocatorSuperblock(largeSizeClass(size_log2), bitset_entries);
   GCNodeAllocator::s_alloctable->insertSuperblock(superblock,
       s_large_superblock_size_log2);
-  GCNodeAllocator::s_superblocks[size_class] = superblock;
 #ifdef HAVE_ADDRESS_SANITIZER
   // Poison all blocks in the superblock. They are unpoisoned one at a time
   // later, when allocated.
@@ -208,6 +206,7 @@ void* rho::AllocatorSuperblock::allocateLarge(unsigned size_log2) {
   } else {
     // Allocate a new large superblock.
     superblock = newLargeSuperblock(size_log2);
+    GCNodeAllocator::s_superblocks[size_class] = superblock;
   }
   return superblock->allocateNextUntouched();
 }

@@ -149,21 +149,21 @@ static unsigned next_log2_32(unsigned size) {
 void rho::GCNodeAllocator::initialize() {
   AllocatorSuperblock::allocateArena();
 
-#ifdef HAVE_ADDRESS_SANITIZER
-  // Initialize quarantine freelists.
-  for (int i = 0; i < s_num_freelists; ++i) {
-    s_quarantine[i] = nullptr;
-  }
-#endif
-
   for (int i = 0; i < s_num_small_pools + s_num_medium_pools; ++i) {
+    // Initialize available superblock pointers.
     s_superblocks[i] = nullptr;
   }
 
   for (int i = 0; i < s_num_freelists; ++i) {
+    // Initialize regular freelists.
     s_freelists[i] = nullptr;
+#ifdef HAVE_ADDRESS_SANITIZER
+    // Initialize quarantine freelists.
+    s_quarantine[i] = nullptr;
+#endif
   }
 
+  // Use a 16 bit hash initially.
   s_alloctable = new rho::AllocationTable(16);
 }
 
@@ -173,7 +173,7 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
   // Increase size to include redzones.
   bytes += 2 * s_redzone_size;
 #endif
-  unsigned block_bytes;  // The actual allocation size (may be more than requested).
+  unsigned actual_bytes;  // The actual allocation size (may be more than requested).
   if (bytes <= 256) {
     int size_class = (bytes + 7) / 8; // Computes ceil(bytes / 8).
     if (size_class < 4) {
@@ -183,18 +183,13 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
       // constant SUPERBLOCK_HEADER_SIZE).
       size_class = 4;
     }
-    block_bytes = size_class * 8;
+    actual_bytes = size_class * 8;
     result = removeFromFreelist(size_class);
     if (!result) {
-      result = AllocatorSuperblock::allocateBlock(block_bytes);
-    }
-    if (!result) {
-      // Allocating in the small object arena failed, so we have to fall
-      // back on using the medium block allocator. To make this work
-      // the object size must be at least 64 bytes:
-      if (bytes < 64) {
-        bytes = 64;
-      }
+      result = AllocatorSuperblock::allocateBlock(actual_bytes);
+      // If allocating in the small object arena fails, we continue
+      // on to using the medium block allocator. The allocation
+      // size will be increased to the minimum allocation size 64 bytes.
     }
   }
   if (!result) {
@@ -202,7 +197,11 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
     // threshold.
     // These allocations are rounded up to the next power of two size.
     unsigned size_log2 = next_log2_32(bytes);
-    block_bytes = 1 << size_log2;
+    if (size_log2 < 6) {
+      // Ensure a minimum allocation size of 64 bytes.
+      size_log2 = 6;
+    }
+    actual_bytes = 1 << size_log2;
     unsigned size_class = size_log2 + s_num_small_pools;
     result = removeFromFreelist(size_class);
     if (!result) {
@@ -213,7 +212,7 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
         GCNodeAllocator::s_alloctable->insert(result, size_log2);
       }
       // Only update heap bounds if allocating a new block.
-      updateHeapBounds(result, block_bytes);
+      updateHeapBounds(result, actual_bytes);
     }
   }
   if (!result) {
@@ -224,7 +223,7 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
   if (lookup_in_allocation_map(result)) {
     allocerr("reusing live allocation");
   }
-  add_to_allocation_map(result, block_bytes);
+  add_to_allocation_map(result, actual_bytes);
   lookupPointer(result);  // Check lookup table consistency.
 #endif
 
@@ -232,10 +231,10 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
   // Poison the redzones.
   // The end redzone can be larger than s_redzone_size if the allocator
   // grew the allocation larger than the requested size.
-  // The additional size (block_bytes - bytes) is added to the default
+  // The additional size (actual_bytes - bytes) is added to the default
   // redzone size.
   void* end_redzone = offsetPointer(result, bytes - s_redzone_size);
-  unsigned end_redzone_size = s_redzone_size + (block_bytes - bytes);
+  unsigned end_redzone_size = s_redzone_size + (actual_bytes - bytes);
   ASAN_POISON_MEMORY_REGION(result, s_redzone_size);
   ASAN_POISON_MEMORY_REGION(end_redzone, end_redzone_size);
 
@@ -247,12 +246,12 @@ void* rho::GCNodeAllocator::allocate(size_t bytes) {
 
 void rho::GCNodeAllocator::free(void* pointer) {
 #ifdef HAVE_ADDRESS_SANITIZER
-  // Adjust for redzone.
+  // Adjust for redzone to find the true start of the allocation.
   pointer = offsetPointer(pointer, -s_redzone_size);
 
-  // Unpoison the start of the allocation so we can link it into a freelist.
+  // Unpoison the first redzone so we can link it into a freelist.
   ASAN_UNPOISON_MEMORY_REGION(pointer, sizeof(FreeListNode));
-#endif // HAVE_ADDRESS_SANITIZER
+#endif
 #ifdef ALLOCATION_CHECK
   if (!lookupPointer(pointer)) {
     allocerr("can not free unknown/already-freed pointer");
@@ -401,12 +400,12 @@ void rho::GCNodeAllocator::addToQuarantine(rho::FreeListNode* free_node, unsigne
   static unsigned quarantine_size = 0;  // Separate from small object quarantine size.
 
   size_t block_size = bytesFromSizeClass(size_class);
-  quarantine_size += block_size;
   free_node->m_next = s_quarantine[size_class];
   s_quarantine[size_class] = free_node;
   ASAN_POISON_MEMORY_REGION(free_node, block_size);
 
   // Clear the quarantine if it has grown too large.
+  quarantine_size += block_size;
   if (quarantine_size > s_max_quarantine_size) {
     quarantine_size = 0;
     // Now we clear the quarantine.
@@ -419,8 +418,8 @@ void rho::GCNodeAllocator::addToQuarantine(rho::FreeListNode* free_node, unsigne
         // Unpoison the quarantined allocation so we can link it into a freelist.
         ASAN_UNPOISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));
         s_quarantine[i] = quarantined_node->m_next;
-        quarantined_node->m_next = s_freelists[size_class];
-        s_freelists[size_class] = quarantined_node;
+        quarantined_node->m_next = s_freelists[i];
+        s_freelists[i] = quarantined_node;
 
         // Re-poison so the freelist nodes stay poisoned while free.
         ASAN_POISON_MEMORY_REGION(quarantined_node, sizeof(FreeListNode));
