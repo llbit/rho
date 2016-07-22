@@ -32,21 +32,14 @@
 
 #include "rho/AddressSanitizer.hpp"
 
-#ifdef ALLOCATION_CHECK
-// Helper functions for allocator consistency checking:
-void add_to_allocation_map(void* allocation, std::size_t size);
-void remove_from_allocation_map(void* allocation);
-void* lookup_in_allocation_map(void* tentative_pointer);
-#endif
-
 /** Reports an allocation error and calls abort(). */
 void allocerr(const char* message);
 
 namespace rho {
   // Forward declarations.
-  struct AllocationTable;
-  struct AllocatorSuperblock;
-  struct GCNode;
+  class AllocationTable;
+  class AllocatorSuperblock;
+  class GCNode;
 
   /**
    * Freelists are used to store superblock nodes and large allocations.
@@ -56,6 +49,14 @@ namespace rho {
     FreeListNode* m_next;
     std::uint32_t m_block;  // Used only for superblock free nodes.
     AllocatorSuperblock* m_superblock;  // Used only for superblock free nodes.
+
+    /**
+     * Insert this allocation into the superblock freelist for the given
+     * allocation size.
+     *
+     * @param size_class the size class for the allocation.
+     */
+    void addToSuperblockFreelist(unsigned size_class);
   };
 
   /**
@@ -70,47 +71,70 @@ namespace rho {
     public:
       GCNodeAllocator() = delete;
 
-      /** \brief Must be called before any allocations can be made. */
-      static void Initialize();
-
-      static void* Allocate(std::size_t bytes);
-      static void Free(void* p);
+      /**
+       * \brief Allocate an object of at least the given size.
+       *
+       * This should only be used to allocate memory for rho::GCNode objects.
+       */
+      static void* allocate(std::size_t bytes);
 
       /** \brief Apply function to all current allocations. */
-      static void ApplyToAllAllocations(std::function<void(void*)> f);
-
-      /** \brief Find heap allocation start pointer. */
-      static GCNode* Lookup(void* candidate);
+      static void applyToAllAllocations(std::function<void(void*)> f);
 
       /** \brief Print allocation overview for debugging. */
-      static void DebugPrint();
+      static void debugPrint();
+
+      /** \brief Free a previously allocated object. */
+      static void free(void* p);
+
+      /** \brief Must be called before any allocations can be made. */
+      static void initialize();
+
+      /**
+       * \brief Find heap allocation start pointer.
+       *
+       * This function finds the corresponding allocation for an internal or
+       * exact object pointer.
+       *
+       * If the pointer is inside the bounds of the small object arena, then
+       * the corresponding superblock is found via pointer manipulation.
+       *
+       * If the pointer is inside the heap bounds, then we iterate over all hash
+       * collisions for the pointer to find the corresponding allocation.
+       */
+      static GCNode* lookupPointer(void* candidate);
+
     private:
       friend class AllocatorSuperblock;
       friend class AllocationTable;
-
-      /** Samll object arena is 1Gb = 30 bits. */
-      static constexpr unsigned s_arenasize = 1 << 30;
+      friend struct FreeListNode;
 
       /** Allocation table for medium and large allocations. */
       static AllocationTable* s_alloctable;
 
-      /** Number of different object sizes for the small-object superblocks. */
+      /** Number of different object sizes plus one for the small-object superblocks. */
       static constexpr int s_num_small_pools = (256 / 8) + 1;
 
-      /** Pointers to small object superblocks with available blocks. */
-      static AllocatorSuperblock* s_small_superblocks[s_num_small_pools];
+      /** Number of different object sizes plus one for the medium-object superblocks. */
+      static constexpr int s_num_medium_pools = 18;
 
-      /** Pointers to medium object superblocks with available blocks. */
-      static AllocatorSuperblock* s_medium_superblocks[18];
+      /** Pointers to superblocks with available blocks, indexed by size class. */
+      static AllocatorSuperblock* s_superblocks[s_num_small_pools + s_num_medium_pools];
 
-      /** Adds an allocation to a freelist. */
-      static void AddToFreelist(uintptr_t data, unsigned size_log2);
+      /**
+       * Adds an allocation to a freelist.
+       *
+       * This should only be used to add medium superblocks and large separate
+       * allocations to a freelist. Small allocations are managed in a separate
+       * freelist.
+       */
+      static void addToFreelist(uintptr_t data, unsigned size_log2);
 
       /**
        * Removes an allocation from a freelist, returns nullptr if there was no
        * available free object.
        */
-      static void* RemoveFromFreelist(unsigned size_log2);
+      static void* removeFromFreelist(unsigned size_log2);
 
 #ifdef HAVE_ADDRESS_SANITIZER
 
@@ -129,20 +153,27 @@ namespace rho {
 
       /** Maximum quarantine size = 10Mb. */
       static constexpr int s_max_quarantine_size = 10 << 20;
-      static FreeListNode* s_small_quarantine[s_num_small_pools];
-      static FreeListNode* s_quarantine[64];
+
+      /**
+       * The quarantine must fit all small superblock size classes, plus
+       * all large allocation sizes (= 33 + 64).
+       */
+      static constexpr int s_num_quarantine_entries = s_num_small_pools + 64;
+      static FreeListNode* s_quarantine[s_num_quarantine_entries];
 
       /** Redzones are added before and after the allocation. */
       static constexpr int s_redzone_size = 16;
 
-      /** Helper function for address calculations. */
-      static void* OffsetPointer(void* pointer, std::size_t bytes);
+      /** Helper function for redzone address calculations. */
+      static void* offsetPointer(void* pointer, std::size_t bytes);
 
-      /** Adds a small object to the small-object quarantine. */
-      static void AddToSmallQuarantine(FreeListNode* free_node, int pool_index);
-
-      /** Adds an object to the quarantine freelist. */
-      static void AddToQuarantine(FreeListNode* free_node, unsigned size_log2);
+      /**
+       * Adds an object to the quarantine freelist.
+       *
+       * The size class is identical to a superlbock size class, or the 2-log
+       * of the allocation size plus s_num_small_pools.
+       */
+      static void addToQuarantine(FreeListNode* free_node, unsigned size_class);
 
 #endif // HAVE_ADDRESS_SANITIZER
 
