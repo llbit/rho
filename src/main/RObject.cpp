@@ -83,7 +83,6 @@ RObject::RObject(const RObject& pattern)
       m_argused(pattern.m_argused), m_active_binding(pattern.m_active_binding),
       m_binding_locked(pattern.m_binding_locked)
 {
-    m_attrib = nullptr;  // NB: Must set initial state before mutating the reference!
     attachReference(m_attrib, clone(pattern.m_attrib));
     maybeTraceMemory(&pattern);
 }

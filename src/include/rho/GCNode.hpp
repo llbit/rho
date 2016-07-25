@@ -129,6 +129,7 @@ namespace rho {
 	{
 	    ++s_num_nodes;
 	    s_moribund->push_back(this);
+            markDirty();  // Mark as dirty and insert in the dirty list.
 	}
 
 	/** @brief Allocate memory.
@@ -233,21 +234,33 @@ namespace rho {
 	 */
 	virtual void visitReferents(const_visitor* v) const {}
 
-        /** @brief Apply a function on each reference of this node.
-         *
-         * The function is not applied to indirect references.
+        /** @brief Call the argument function on each coalesced reference
+         * counted reference.
          */
-	void applyToReferents(std::function<void(const GCNode*)> fun) const {
-            ApplyVisitor visitor(fun);
-            visitReferents(&visitor);
-        }
-
-	virtual void applyToCoalescedReferences(std::function<void(const GCNode*)> fun) const {}
+	virtual void applyToCoalescedReferences(
+                std::function<void(const GCNode*)> fun) const {}
 
 	// If candidate_pointer is a (possibly internal) pointer to a GCNode,
 	// returns the pointer to that node.
 	// Otherwise returns nullptr.
 	static GCNode* asGCNode(void* candidate_pointer);
+
+    protected:
+	/**
+	 * @note The destructor is protected to ensure that GCNode
+	 * objects are allocated using 'new'.  (See Meyers 'More
+	 * Effective C++' Item 27.) Derived classes should likewise
+	 * declare their destructors private or protected.
+	 */
+	virtual ~GCNode()
+	{
+	    if (m_rcmms & s_moribund_mask)
+		destruct_aux();
+	    --s_num_nodes;
+	}
+
+        // Reference mutator methods are below. Each of them marks the node as dirty
+        // if it was not already, and inserts it in the dirty list.
 
         /** @brief Set the initial target of a GCNode reference.
          *
@@ -329,45 +342,12 @@ namespace rho {
             reference = nullptr;
         }
 
-    protected:
-	/**
-	 * @note The destructor is protected to ensure that GCNode
-	 * objects are allocated using 'new'.  (See Meyers 'More
-	 * Effective C++' Item 27.) Derived classes should likewise
-	 * declare their destructors private or protected.
-	 */
-	virtual ~GCNode()
-	{
-	    if (m_rcmms & s_moribund_mask)
-		destruct_aux();
-	    --s_num_nodes;
-	}
     private:
 	friend class GCRootBase;
 	friend class GCStackFrameBoundary;
 	friend class GCStackRootBase;
 	friend class NodeStack;
 	friend class WeakRef;
-
-	/** @brief Visitor class used to call a function on each reference of a GCNode.
-	 *
-         * This visitor will visit only direct references - it does not recurse to
-         * indirect references (in contrast to a marking visitor).
-	 */
-	class ApplyVisitor : public const_visitor {
-	public:
-            ApplyVisitor(std::function<void(const GCNode*)> fun): m_function(fun) { }
-
-	    void operator()(const GCNode* node) override {
-                // TODO: The apply function needs to be able to modify the
-                // reference count of the argument. So this is not const
-                // correct. This should be fixed in the future.
-                m_function(node);
-            }
-
-        private:
-            std::function<void(const GCNode*)> m_function;
-	};
 
 	/** Visitor class used to mark nodes.
 	 *

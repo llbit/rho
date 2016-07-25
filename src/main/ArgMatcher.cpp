@@ -50,7 +50,6 @@ bool ArgMatcher::s_warn_on_partial_match = false;
 ArgMatcher::ArgMatcher(const PairList* formals)
     : m_dots_position(-1)
 {
-    m_formals = nullptr;  // NB: Need initial state for the reference!
     attachReference(m_formals, formals);
 
     for (const PairList* f = formals; f; f = f->tail()) {

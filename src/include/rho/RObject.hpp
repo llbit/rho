@@ -569,7 +569,7 @@ namespace rho {
 	bool m_active_binding : 1;
 	bool m_binding_locked : 1;
     private:
-	PairList* m_attrib = nullptr; // Must always be initialized to null (no longer GCEdge).
+	PairList* m_attrib = nullptr; // Must always be initialized.
 
 #ifdef R_MEMORY_PROFILING
 	// This function implements maybeTraceMemory() (qv.) when

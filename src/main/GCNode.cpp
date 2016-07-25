@@ -109,7 +109,14 @@ HOT_FUNCTION void* GCNode::operator new(size_t bytes) {
     return result;
 }
 
-GCNode::GCNode(CreateAMinimallyInitializedGCNode*) : m_rcmms(s_decinc_refcount[1]) {
+// A minimally initialized GCNode is marked as dirty in order to avoid
+// remembering partially initialized references, just in case any reference
+// mutation method were called on the node before its constructor is called,
+// which normally should not happen.  The real GCNode constructor will insert
+// this node in the dirty list so that its outgoing references are counted
+// before the next GC pass.
+GCNode::GCNode(CreateAMinimallyInitializedGCNode*) :
+    m_rcmms(s_decinc_refcount[1] | s_dirty_mask) {
 }
 
 void GCNode::operator delete(void* pointer, size_t bytes) {
