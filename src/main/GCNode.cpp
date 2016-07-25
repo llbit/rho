@@ -162,10 +162,12 @@ void GCNode::applyCoalescedReferenceUpdates() {
 
     // Decrement the reference count of all remembered references.
     for (auto node : s_remembered_references) {
+#if 0
         // Ensure it is still allocated using asGCNode().
         if (!asGCNode(const_cast<GCNode*>(node))) {
             Rf_error("remembered reference deleted when expected to not be");
         }
+#endif
         decRefCount(node);
     }
     s_remembered_references.clear();
