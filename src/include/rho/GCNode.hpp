@@ -129,7 +129,10 @@ namespace rho {
 	{
 	    ++s_num_nodes;
 	    s_moribund->push_back(this);
-            makeDirty();  // Mark as dirty and insert in the dirty list.
+
+            // Mark as dirty but don't insert in the dirty list yet,
+            // that will be done on the first reference mutation.
+            m_refcount_flags |= s_dirty_mask;
 	}
 
 	/** @brief Allocate memory.
@@ -427,6 +430,8 @@ namespace rho {
 	  // significant bit is set to s_mark on construction; this
 	  // bit is then toggled in the mark phase of a mark-sweep
 	  // garbage collection to identify reachable nodes.
+
+        mutable bool m_in_dirty_list = false;
 
 	static void gcliteImpl();
 

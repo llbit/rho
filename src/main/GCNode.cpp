@@ -66,12 +66,16 @@ bool GCNode::isDirty() const {
 
 void GCNode::clearDirtyFlag() const {
     m_refcount_flags &= static_cast<unsigned char>(~s_dirty_mask);
+    m_in_dirty_list = false;
 }
 
 void GCNode::makeDirty() const {
+    if (!m_in_dirty_list) {
+        m_in_dirty_list = true;
+        s_dirty_nodes.push_back(this);
+    }
     if (!isDirty()) {
         m_refcount_flags |= s_dirty_mask;
-        s_dirty_nodes.push_back(this);
         applyToCoalescedReferences([](const GCNode* node) {
             if (node) {
                 s_remembered_references.push_back(node);
